@@ -1,0 +1,60 @@
+# Node.js
+node_modules/
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+
+# Runtime data
+pids
+*.pid
+*.seed
+*.pid.lock
+
+# Coverage
+coverage/
+.nyc_output/
+
+# Build output
+dist/
+build/
+lib/
+out/
+esm/
+cjs/
+*.tsbuildinfo
+
+# Optional npm cache
+.npm
+
+# Debug / cache
+.cache/
+.parcel-cache/
+
+# Environment variables
+.env
+.env.*.local
+.env.local
+
+# IDEs and editors
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Misc
+.serverless/
+.pnp/
+.pnp.js
+.turbo/
+
+# Test results
+test-results.xml
