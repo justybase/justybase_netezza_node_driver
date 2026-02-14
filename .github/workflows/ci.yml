@@ -7,7 +7,7 @@ on:
     branches: [ main ]
 
 jobs:
-  build_test:
+  build:
     runs-on: ubuntu-latest
 
     steps:
@@ -24,6 +24,6 @@ jobs:
       
     - name: Run Build
       run: npm run build
-      
-    - name: Run Smoke Tests
-      run: npm run test:smoke
+
+    # Tests require local Netezza environment
+    # Run tests locally with: npm run test:smoke or npm run test:full
