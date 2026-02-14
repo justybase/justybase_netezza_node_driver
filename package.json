@@ -32,12 +32,12 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/KrzysztofDusko/netezza-driver.git"
+    "url": "git+https://github.com/KrzysztofDusko/justybase_netezza_node_driver.git"
   },
   "bugs": {
-    "url": "https://github.com/KrzysztofDusko/netezza-driver/issues"
+    "url": "https://github.com/KrzysztofDusko/justybase_netezza_node_driver/issues"
   },
-  "homepage": "https://github.com/KrzysztofDusko/netezza-driver#readme",
+  "homepage": "https://github.com/KrzysztofDusko/justybase_netezza_node_driver#readme",
   "keywords": [
     "netezza",
     "ibm",
