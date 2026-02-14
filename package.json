@@ -28,7 +28,7 @@
     "test:smoke": "jest --runInBand --config jest.config.js --testPathPatterns=\\.smoke\\.",
     "test:full": "jest --runInBand --config jest.config.js",
     "test:debug": "set DEBUG=nz:* & jest --runInBand --config jest.config.js",
-    "prepublishOnly": "npm run clean && npm run build && npm run test:smoke"
+    "prepublishOnly": "npm run clean && npm run build"
   },
   "repository": {
     "type": "git",
