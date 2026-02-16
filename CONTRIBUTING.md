@@ -62,8 +62,8 @@ Enhancement suggestions are tracked as GitHub issues. When creating an enhanceme
 
 2. **Clone your fork locally**:
    ```bash
-   git clone https://github.com/YOUR_USERNAME/netezza-driver.git
-   cd netezza-driver
+   git clone https://github.com/YOUR_USERNAME/justybase_netezza_node_driver.git
+   cd justybase_netezza_node_driver
    ```
 
 3. **Install dependencies**:
@@ -84,7 +84,7 @@ Enhancement suggestions are tracked as GitHub issues. When creating an enhanceme
 ### Project Structure
 
 ```
-netezza-driver/
+justybase_netezza_node_driver/
 src/
   index.ts              # Public exports
   NzConnection.ts       # Main connection class
