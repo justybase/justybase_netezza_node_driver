@@ -1,12 +1,13 @@
 import * as net from 'net';
 import * as tls from 'tls';
 import * as fs from 'fs';
+import * as path from 'path';
 import { Readable } from 'stream';
 import { EventEmitter } from 'events';
 import { Handshake } from './Handshake';
 import { PGUtil } from './utils/PGUtil';
 import { NzCommand } from './NzCommand';
-import { NzDataReader } from './NzDataReader';
+import { NzDataReader, GeneratorItem, ColumnDescription } from './NzDataReader';
 import { DbosTupleDesc } from './DbosTupleDesc';
 import { BackendMessageCode, NzType, ExtabSock } from './protocol/constants';
 import * as TypeConversions from './types/TypeConversions';
@@ -71,6 +72,14 @@ interface ColumnInfo {
 
 type Stream = net.Socket | tls.TLSSocket;
 
+type ResponseMessage =
+    | { type: 'ErrorResponse'; message: string }
+    | { type: 'RowDescription'; columns: ColumnInfo[] }
+    | { type: 'RowDescriptionStandard'; desc: DbosTupleDesc }
+    | { type: 'DataRow'; row: unknown[] }
+    | { type: 'CommandComplete'; text: string; rowsAffected: number }
+    | { type: 'ReadyForQuery' };
+
 class NzConnection extends EventEmitter {
     config: NzConnectionConfig;
     private _socket: net.Socket | null = null;
@@ -80,7 +89,7 @@ class NzConnection extends EventEmitter {
     private _commandNumber: number = -1;
     private _connected: boolean = false;
     private _rowDescription: ColumnInfo[] | null = null;
-    private _rows: any[] = [];
+    private _rows: unknown[] = [];
     private _tupdesc: DbosTupleDesc = new DbosTupleDesc();
     private _tmpBuffer: Buffer = Buffer.alloc(65536);
 
@@ -183,7 +192,18 @@ class NzConnection extends EventEmitter {
                 debug('Socket connected');
                 this._socket!.setNoDelay(true);
                 this._stream = this._socket!;
-                const handshake = new Handshake(this._socket!, this._stream, this.config.host, this.config as any);
+                const handshake = new Handshake(
+                    this._socket!,
+                    this._stream,
+                    this.config.host,
+                    this.config as NzConnectionConfig & {
+                        securityLevel?:
+                            | 'PreferredUnsecured'
+                            | 'OnlyUnsecuredSession'
+                            | 'PreferredSecuredSession'
+                            | 'OnlySecuredSession';
+                    }
+                );
                 try {
                     this._stream = await handshake.startup(
                         this.config.database,
@@ -250,7 +270,7 @@ class NzConnection extends EventEmitter {
     }
 
     createCommand(sql?: string): NzCommand {
-        const cmd = new NzCommand(this as any);
+        const cmd = new NzCommand(this);
         if (sql) cmd.commandText = sql;
         return cmd;
     }
@@ -431,8 +451,8 @@ class NzConnection extends EventEmitter {
                 debug('Command timeout triggered');
                 try {
                     await this.cancel();
-                } catch (e: any) {
-                    debug('Cancel failed during timeout:', e.message);
+                } catch (e: unknown) {
+                    debug('Cancel failed during timeout:', (e as Error).message);
                 }
                 reject(new Error('Command execution timeout'));
             }, timeoutSeconds * 1000);
@@ -440,8 +460,8 @@ class NzConnection extends EventEmitter {
 
         try {
             return await Promise.race([execPromise, timeoutPromise]);
-        } catch (err: any) {
-            if (err.message && err.message.includes('Command execution timeout')) {
+        } catch (err: unknown) {
+            if ((err as Error).message && (err as Error).message.includes('Command execution timeout')) {
                 execPromise.catch(() => {});
             }
             throw err;
@@ -487,16 +507,16 @@ class NzConnection extends EventEmitter {
                 try {
                     await this.cancel();
                     reject(new Error('Command execution timeout'));
-                } catch (e: any) {
-                    reject(new Error('Command execution timeout (Cancel failed: ' + e.message + ')'));
+                } catch (e: unknown) {
+                    reject(new Error('Command execution timeout (Cancel failed: ' + (e as Error).message + ')'));
                 }
             }, timeoutSeconds * 1000);
         });
 
         try {
             return await Promise.race([execPromise, timeoutPromise]);
-        } catch (err: any) {
-            if (err.message && err.message.includes('Command execution timeout')) {
+        } catch (err: unknown) {
+            if ((err as Error).message && (err as Error).message.includes('Command execution timeout')) {
                 execPromise.catch(() => {});
             }
             throw err;
@@ -520,7 +540,7 @@ class NzConnection extends EventEmitter {
 
             let item = await generator.next();
             let error: Error | null = null;
-            let initialNextItem: any = null;
+            let initialNextItem: ResponseMessage | null = null;
 
             while (!item.done) {
                 const val = item.value;
@@ -529,7 +549,7 @@ class NzConnection extends EventEmitter {
                 } else if (val.type === 'RowDescriptionStandard') {
                     const desc = val.desc;
                     if (desc && desc.numFields > 0 && columns.length === 0) {
-                        const ps = (command as any)._preparedStatement;
+                        const ps = command._preparedStatement;
                         if (ps && ps.description) {
                             columns = ps.description;
                         }
@@ -552,13 +572,13 @@ class NzConnection extends EventEmitter {
             }
 
             return new NzDataReader(
-                command as any,
-                generator as any,
-                columns as any,
+                command,
+                generator as AsyncGenerator<GeneratorItem>,
+                columns as ColumnDescription[] | null,
                 () => {
                     this._executing = false;
                 },
-                initialNextItem
+                initialNextItem as GeneratorItem | null
             );
         } catch (e) {
             this._executing = false;
@@ -585,7 +605,7 @@ class NzConnection extends EventEmitter {
         this._stream!.write(buf);
     }
 
-    private async *_responseGenerator(command: NzCommand): AsyncGenerator<any> {
+    private async *_responseGenerator(command: NzCommand): AsyncGenerator<ResponseMessage> {
         this._rows = [];
         this._rowDescription = null;
 
@@ -622,9 +642,9 @@ class NzConnection extends EventEmitter {
             if (type === 'e'.charCodeAt(0)) {
                 await this._readBytes(4);
                 const len = PGUtil.readInt32(await this._readBytes(4));
-                // logDir is read but not used - kept for protocol compliance
-                await this._readBytes(len - 1);
-                await this._readBytes(1);
+                const logDirBuf = await this._readBytes(len - 1);
+                const logDir = logDirBuf.toString('utf8');
+                await this._readBytes(1); // null terminator
 
                 const filenameBuf: number[] = [];
                 let b = (await this._readBytes(1))[0];
@@ -634,10 +654,12 @@ class NzConnection extends EventEmitter {
                     if (b === 0) break;
                     filenameBuf.push(b);
                 }
-                // logType is read but not used - kept for protocol compliance
-                await this._readBytes(4);
+                const filename = Buffer.from(filenameBuf).toString('utf8');
 
-                await this._consumeExternalTableLogData();
+                const logTypeBuf = await this._readBytes(4);
+                const logType = PGUtil.readInt32(logTypeBuf);
+
+                await this._saveExternalTableLog(logDir, filename, logType);
                 continue;
             }
 
@@ -687,7 +709,7 @@ class NzConnection extends EventEmitter {
                 const len = await this._readInt32();
                 const data = await this._readBytes(len);
                 this._parseRowDescription(data, command);
-                yield { type: 'RowDescription', columns: this._rowDescription };
+                yield { type: 'RowDescription', columns: this._rowDescription! };
                 continue;
             }
 
@@ -702,7 +724,7 @@ class NzConnection extends EventEmitter {
             if (type === BackendMessageCode.RowDescriptionStandard) {
                 const len = await this._readInt32();
                 const data = await this._readBytes(len);
-                this._tupdesc.parse(data, (command as any)._preparedStatement);
+                this._tupdesc.parse(data, command._preparedStatement);
                 yield { type: 'RowDescriptionStandard', desc: this._tupdesc };
                 continue;
             }
@@ -731,14 +753,54 @@ class NzConnection extends EventEmitter {
         }
     }
 
-    private async _consumeExternalTableLogData(): Promise<void> {
-        while (true) {
-            const lenBuf = await this._readBytes(4);
-            const len = PGUtil.readInt32(lenBuf);
-            if (len === 0) return;
+    private async _saveExternalTableLog(logDir: string, filename: string, logType: number): Promise<void> {
+        // Determine file extension based on logType (same as C# implementation)
+        let extension: string;
+        if (logType === 1) {
+            extension = '.nzlog';
+        } else if (logType === 2) {
+            extension = '.nzbad';
+        } else if (logType === 3) {
+            extension = '.nzstats';
+        } else {
+            extension = '.log';
+        }
 
-            const data = await this._readBytes(len);
-            debug('ExtLog Content:', data.toString('utf8'));
+        // Construct full path
+        const fullPath = path.join(logDir, filename + extension);
+        debug('Saving external table log to:', fullPath);
+
+        const writeStream = fs.createWriteStream(fullPath, { encoding: 'utf8' });
+        let hasError = false;
+
+        writeStream.on('error', (err) => {
+            hasError = true;
+            debug('Error writing external table log:', err);
+        });
+
+        try {
+            while (true) {
+                const lenBuf = await this._readBytes(4);
+                const len = PGUtil.readInt32(lenBuf);
+                if (len === 0) break; // EOF
+
+                const data = await this._readBytes(len);
+                if (!hasError) {
+                    writeStream.write(data);
+                }
+            }
+
+            await new Promise<void>((resolve, reject) => {
+                writeStream.end(() => {
+                    debug('External table log saved successfully:', fullPath);
+                    resolve();
+                });
+                writeStream.on('error', reject);
+            });
+        } catch (err) {
+            writeStream.destroy();
+            debug('Error saving external table log:', err);
+            throw err;
         }
     }
 
@@ -889,8 +951,7 @@ class NzConnection extends EventEmitter {
 
         if (NzConnection._streamRegistry.has(filename)) {
             readStream = NzConnection._streamRegistry.get(filename)!;
-            // Try to get size from stream property if set manually by user on the stream object
-            totalSize = (readStream as any).byteLength || 0;
+            totalSize = (readStream as Readable & { byteLength?: number }).byteLength || 0;
         } else {
             const fileStats = fs.statSync(filename);
             totalSize = fileStats.size;
@@ -985,14 +1046,14 @@ class NzConnection extends EventEmitter {
             debug('Column', i, ':', name, 'typeOid:', typeOid, 'typeLen:', typeLen);
         }
 
-        if (command) (command as any)._preparedStatement = { description: this._rowDescription };
+        if (command) command._preparedStatement = { description: this._rowDescription };
     }
 
-    private _parseDataRow(data: Buffer): any[] {
+    private _parseDataRow(data: Buffer): unknown[] {
         const numberOfCol = this._rowDescription!.length;
         const bitmapLen = Math.ceil(numberOfCol / 8);
         let dataIdx = bitmapLen;
-        const row: any[] = [];
+        const row: unknown[] = [];
 
         for (let columnNumber = 0; columnNumber < numberOfCol; columnNumber++) {
             const byteToTest = data[Math.floor(columnNumber / 8)];
@@ -1028,7 +1089,7 @@ class NzConnection extends EventEmitter {
         return row;
     }
 
-    private async _resReadDbosTuple(_command: NzCommand): Promise<any[]> {
+    private async _resReadDbosTuple(_command: NzCommand): Promise<unknown[]> {
         const numFields = this._tupdesc.numFields;
         await this._readBytes(4);
         const rowLength = PGUtil.readInt32(await this._readBytes(4));
@@ -1047,7 +1108,7 @@ class NzConnection extends EventEmitter {
         return row;
     }
 
-    private _parseFieldByType(fieldData: Buffer, fldType: number, fldLen: number, fieldIdx: number): any {
+    private _parseFieldByType(fieldData: Buffer, fldType: number, fldLen: number, fieldIdx: number): unknown {
         switch (fldType) {
             case NzType.NzTypeChar:
                 return fieldData.toString('latin1', 0, fldLen).trimEnd();

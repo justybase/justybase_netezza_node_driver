@@ -31,7 +31,7 @@ interface SchemaRow {
  */
 interface GeneratorItem {
     type: string;
-    row?: any[];
+    row?: unknown[];
     columns?: ColumnDescription[];
     message?: string;
 }
@@ -82,7 +82,7 @@ class NzDataReader {
     generator: AsyncGenerator<GeneratorItem>;
     columnDescriptions: ColumnDescription[];
     releaseCallback: (() => void) | null;
-    currentRow: any[] | null = null;
+    currentRow: unknown[] | null = null;
     closed: boolean = false;
 
     private _nameIndex: Record<string, number> = {};
@@ -191,7 +191,7 @@ class NzDataReader {
             }
 
             if (val.type === 'RowDescriptionStandard') {
-                const ps = (this.command as any)?._preparedStatement;
+                const ps = this.command._preparedStatement;
                 if (this.columnDescriptions.length === 0 && ps && ps.description) {
                     this.columnDescriptions = ps.description;
                     this._initNameIndex();
@@ -404,7 +404,7 @@ class NzDataReader {
             }
 
             if (val.type === 'RowDescriptionStandard') {
-                const ps = (this.command as any)?._preparedStatement;
+                const ps = this.command._preparedStatement;
                 this._pendingColumns = ps && ps.description ? ps.description : this.columnDescriptions;
                 this.currentRow = null;
                 return false;
@@ -429,12 +429,12 @@ class NzDataReader {
         }
     }
 
-    getValue(i: number): any {
+    getValue(i: number): unknown {
         this._validateOrdinal(i);
         return this.currentRow![i];
     }
 
-    getValueByName(name: string): any {
+    getValueByName(name: string): unknown {
         const i = this.getOrdinal(name);
         return this.getValue(i);
     }
@@ -518,7 +518,7 @@ class NzDataReader {
         const val = this.getValue(i);
         if (val === null) return null;
         if (typeof val === 'string') return val;
-        if (val.toString) return val.toString();
+        if (val && val.toString) return val.toString();
         return String(val);
     }
 
@@ -526,10 +526,10 @@ class NzDataReader {
         const val = this.getValue(i);
         if (val === null) return null;
         if (val instanceof Date) return val;
-        return new Date(val);
+        return new Date(val as string | number);
     }
 
-    getTimeSpan(i: number): TimeValue | any | null {
+    getTimeSpan(i: number): TimeValue | unknown | null {
         const val = this.getValue(i);
         if (val === null) return null;
         if (typeof val === 'object' && 'hours' in val) return val;
@@ -551,16 +551,16 @@ class NzDataReader {
         return val;
     }
 
-    getRowObject(): Record<string, any> | null {
+    getRowObject(): Record<string, unknown> | null {
         if (!this.currentRow) return null;
-        const obj: Record<string, any> = {};
+        const obj: Record<string, unknown> = {};
         for (let i = 0; i < this.columnDescriptions.length; i++) {
             obj[this.columnDescriptions[i].name] = this.currentRow[i];
         }
         return obj;
     }
 
-    getValues(): any[] {
+    getValues(): unknown[] {
         if (!this.currentRow) return [];
         return [...this.currentRow];
     }
@@ -597,11 +597,11 @@ class NzDataReader {
         }
     }
 
-    async *[Symbol.asyncIterator](): AsyncGenerator<Record<string, any>> {
+    async *[Symbol.asyncIterator](): AsyncGenerator<Record<string, unknown>> {
         while (await this.read()) {
             yield this.getRowObject()!;
         }
     }
 }
 
-export { NzDataReader };
+export { NzDataReader, ColumnDescription, GeneratorItem };
