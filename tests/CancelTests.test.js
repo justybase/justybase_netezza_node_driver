@@ -20,6 +20,47 @@ const HEAVY_SQL = `
         LIMIT 500    
 `;
 
+const READER_HEAVY_SQL = `
+        SELECT 2, F1.*
+        FROM JUST_DATA..FACTPRODUCTINVENTORY F1
+        JOIN JUST_DATA..DIMDATE D1 ON 1=1
+        LIMIT 50000000
+`;
+
+const CANCEL_SLA_MS = 2000;
+
+async function ensureTempTable(conn) {
+    const dropCmd = conn.createCommand("DROP TABLE TT1 IF EXISTS");
+    await dropCmd.executeNonQuery();
+
+    const createCmd = conn.createCommand(`
+        CREATE TEMP TABLE TT1 AS
+        (
+            SELECT 1 AS COLUMN_ONE
+        )
+        DISTRIBUTE ON RANDOM
+    `);
+    await createCmd.executeNonQuery();
+
+    const verifyCmd = conn.createCommand("SELECT COLUMN_ONE FROM TT1");
+    const verifyReader = await verifyCmd.executeReader();
+    expect(await verifyReader.read()).toBe(true);
+    expect(Number(verifyReader.getValue(0))).toBe(1);
+    await verifyReader.close();
+}
+
+async function readRows(reader, expectedRows) {
+    let rowsRead = 0;
+    while (rowsRead < expectedRows) {
+        const hasRow = await reader.read();
+        if (!hasRow) {
+            throw new Error(`Reader ended before ${expectedRows} rows. Got ${rowsRead}.`);
+        }
+        rowsRead++;
+    }
+    return rowsRead;
+}
+
 describe('NzDriver - Query Cancellation', () => {
     let conn;
 
@@ -94,5 +135,55 @@ describe('NzDriver - Query Cancellation', () => {
         await reader.close();
 
         console.log('Cancellation test loop passed, session state preserved.');
+    }, 60000);
+
+    test('Should cancel active reader and execute next SQL within SLA', async () => {
+        await ensureTempTable(conn);
+
+        for (let i = 0; i < 3; i++) {
+            const cmd = conn.createCommand(READER_HEAVY_SQL);
+            const reader = await cmd.executeReader();
+
+            const rowsRead = await readRows(reader, 1000);
+            expect(rowsRead).toBe(1000);
+
+            const start = Date.now();
+            await cmd.cancel();
+            await reader.close();
+
+            cmd.commandText = "SELECT COLUMN_ONE FROM TT1";
+            const verifyReader = await cmd.executeReader();
+            const hasRow = await verifyReader.read();
+            const value = hasRow ? Number(verifyReader.getValue(0)) : null;
+            await verifyReader.close();
+
+            const elapsed = Date.now() - start;
+            console.log(`Cancel->next SQL latency (iteration ${i + 1}): ${elapsed}ms`);
+
+            expect(hasRow).toBe(true);
+            expect(value).toBe(1);
+            expect(elapsed).toBeLessThan(CANCEL_SLA_MS);
+        }
+    }, 90000);
+
+    test('Reader close after cancel should complete quickly and preserve session', async () => {
+        await ensureTempTable(conn);
+
+        const cmd = conn.createCommand(READER_HEAVY_SQL);
+        const reader = await cmd.executeReader();
+        await readRows(reader, 1000);
+
+        await cmd.cancel();
+        const closeStart = Date.now();
+        await reader.close();
+        const closeElapsed = Date.now() - closeStart;
+        console.log(`reader.close() after cancel latency: ${closeElapsed}ms`);
+        expect(closeElapsed).toBeLessThan(CANCEL_SLA_MS);
+
+        cmd.commandText = "SELECT COLUMN_ONE FROM TT1";
+        const verifyReader = await cmd.executeReader();
+        expect(await verifyReader.read()).toBe(true);
+        expect(Number(verifyReader.getValue(0))).toBe(1);
+        await verifyReader.close();
     }, 60000);
 });
