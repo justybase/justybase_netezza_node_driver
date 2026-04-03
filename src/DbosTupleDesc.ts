@@ -26,6 +26,8 @@ class DbosTupleDesc {
     fieldPhysField: number[] = [];
     fieldLogField: number[] = [];
     fieldNullAllowed: boolean[] = [];
+    fieldNullByteOffset: number[] = [];
+    fieldNullBitMask: number[] = [];
     fieldFixedSize: number[] = [];
     fieldSpringField: number[] = [];
 
@@ -44,6 +46,8 @@ class DbosTupleDesc {
         this.fieldPhysField = [];
         this.fieldLogField = [];
         this.fieldNullAllowed = [];
+        this.fieldNullByteOffset = [];
+        this.fieldNullBitMask = [];
         this.fieldFixedSize = [];
         this.fieldSpringField = [];
     }
@@ -92,9 +96,12 @@ class DbosTupleDesc {
             this.fieldSize.push(data.readInt32BE(idx + 4));
             this.fieldTrueSize.push(data.readInt32BE(idx + 8));
             this.fieldOffset.push(data.readInt32BE(idx + 12));
-            this.fieldPhysField.push(data.readInt32BE(idx + 16));
+            const physField = data.readInt32BE(idx + 16);
+            this.fieldPhysField.push(physField);
             this.fieldLogField.push(data.readInt32BE(idx + 20));
             this.fieldNullAllowed.push(data.readInt32BE(idx + 24) !== 0);
+            this.fieldNullByteOffset.push(2 + Math.floor(physField / 8));
+            this.fieldNullBitMask.push(1 << (physField % 8));
             this.fieldFixedSize.push(data.readInt32BE(idx + 28));
             this.fieldSpringField.push(data.readInt32BE(idx + 32));
             idx += 36;

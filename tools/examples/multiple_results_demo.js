@@ -2,7 +2,7 @@
  * Multiple Result Sets Demo
  */
 
-const { NzConnection } = require('./dist/NzConnection');
+const { NzConnection } = require('../../dist');
 
 const config = {
     host: '192.168.0.144',

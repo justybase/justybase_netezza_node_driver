@@ -94,7 +94,8 @@ describe('Smoke Tests - Core Functionality', () => {
             const reader = await cmd.executeReader();
             expect(await reader.read()).toBe(true);
             const val = reader.getValue(0);
-            expect(val.toString()).toContain('2024');
+            expect(val).toBeInstanceOf(Date);
+            expect(val.toISOString()).toBe('2024-12-11T00:00:00.000Z');
             await reader.close();
         });
 
@@ -208,8 +209,8 @@ describe('Smoke Tests - Core Functionality', () => {
             const reader = await cmd.executeReader();
             expect(await reader.read()).toBe(true);
             const val = reader.getValue(0);
-            const result = typeof val === 'boolean' ? val : (val === 't' || val === true);
-            expect(result).toBe(expected);
+            expect(typeof val).toBe('boolean');
+            expect(val).toBe(expected);
             await reader.close();
         });
     });
@@ -226,8 +227,8 @@ describe('Smoke Tests - Core Functionality', () => {
             const reader = await cmd.executeReader();
             expect(await reader.read()).toBe(true);
             const val = reader.getValue(0);
-            const result = typeof val === 'boolean' ? val : (val === 't' || val === true);
-            expect(result).toBe(expected);
+            expect(typeof val).toBe('boolean');
+            expect(val).toBe(expected);
             await reader.close();
         });
     });

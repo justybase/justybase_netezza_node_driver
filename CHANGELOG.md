@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] - 2026-04-03
+
+### Breaking Changes
+- Loose text-protocol queries now return the same JavaScript value types as table-backed binary queries when the server exposes a known type OID. Queries such as `SELECT true::BOOLEAN`, `SELECT '2024-12-11'::DATE`, `SELECT '2024-12-11 14:30:00'::TIMESTAMP`, and `SELECT 12345::BIGINT` no longer come back as raw strings.
+- `BOOL` now returns `boolean`, `BYTEINT`/`INT2`/`INT4`/`OID` return `number`, `INT8` returns `bigint`, `DATE`/`TIMESTAMP`/`TIMESTAMPTZ`/`ABSTIME` return `Date`, and `NUMERIC` follows the same precision-preserving `number | string` rule on both protocol paths.
+
+### Changed
+- Reduced row-decoding overhead in both text and binary paths by caching per-column parsers, precomputing null-bitmap lookups, caching reader metadata, and replacing the legacy binary `NUMERIC` decoder with a `BigInt`-based implementation.
+- `getSchemaTable()` and `getColumnMetadata()` now report `BigInt` for `INT8` columns so schema metadata matches the runtime value contract introduced in `2.0.0`.
+- Consolidated the unreleased 1.1.1 metadata work into this release so the changelog reflects the actual published history.
+
+### Fixed
+- Unified text-protocol `DataRow` conversion with the existing binary/DBOS conversion contract so `SELECT ...` and `SELECT ... FROM table` no longer disagree on value types for booleans, integers, numerics, dates, timestamps, and known system OIDs.
+- `getSchemaTable().Rows[].AllowDBNull` now uses DBOS tuple-descriptor nullability when available instead of always reporting `true`.
+- SSL tests no longer depend on hardcoded `D:\DEV\Others\keys\...` paths. The valid-certificate test is now gated by `NZ_SSL_CERT_PATH`, and the invalid-certificate fixture is created in the system temp directory.
+- External-table tests and example scripts no longer depend on machine-specific temp paths such as `C:\DEV\TMP`; they now use `NZ_LOCAL_TMP_DIR` or the operating-system temp directory.
+- Corrected live Netezza metadata mapping for Unicode text OIDs: `2530` now reports `NVARCHAR` instead of `DATE`, and `2522` now reports `NCHAR` instead of `UNKNOWN(2522)`.
+- Kept `DATE` mapping exclusive to provider OID `1082` and aligned `getSchemaTable()` with `getTypeName()` so Unicode text families stay string-like.
+- Preserved declared character lengths from `typeMod` in metadata and schema rows for character families such as `VARCHAR(32)`, `NVARCHAR(32)`, and `NCHAR(8)`.
+- Added live metadata mappings for `BYTEINT` (`2500`), system `OID` (`26`), and system `ABSTIME` (`702`) so these no longer surface as `UNKNOWN(...)`.
+
+### Added
+- Added regression coverage for typed loose `BOOLEAN`, `DATE`, `TIMESTAMP`, and `NUMERIC` queries so text-protocol consistency is enforced in smoke/full tests.
+- Added numeric-conversion parity tests and an appliance-backed scenario benchmark harness for measuring real performance changes before keeping them.
+- Added public metadata helpers on `NzDataReader`: `getProviderType()`, `getTypeModifier()`, `getTypeLength()`, `getDeclaredTypeName()`, and `getColumnMetadata()`.
+- Added live smoke/full coverage for `VARCHAR`, `NVARCHAR`, `NCHAR`, `NATIONAL CHARACTER VARYING`, `CURRENT_DATE`, and `CURRENT_TIMESTAMP` metadata.
+- Added live smoke coverage for `BYTEINT`, `_V_TABLE.OBJID` (`OID`), and `_V_TABLE.CREATEDATE` (`ABSTIME`) metadata.
+
 ## [1.0.1] - 2026-02-14
 
 ### Changed
@@ -37,6 +65,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 [1.0.1]: https://github.com/KrzysztofDusko/netezza-driver/releases/tag/v1.0.1
 [1.0.0]: https://github.com/KrzysztofDusko/netezza-driver/releases/tag/v1.0.0
+[2.0.0]: https://github.com/KrzysztofDusko/netezza-driver/releases/tag/v2.0.0
 
 ## [1.1.0] - 2026-02-16
 

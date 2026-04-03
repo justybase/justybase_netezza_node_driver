@@ -1,5 +1,7 @@
 const { NzConnection } = require('../dist/NzConnection');
 const fs = require('fs');
+const os = require('os');
+const path = require('path');
 
 // Configuration
 const config = {
@@ -10,11 +12,13 @@ const config = {
     password: process.env.NZ_DEV_PASSWORD || 'password'
 };
 
-const CERT_PATH = "D:\\DEV\\Others\\keys\\server-cert.pem";
+const CERT_PATH = process.env.NZ_SSL_CERT_PATH || null;
+const hasValidCert = !!(CERT_PATH && fs.existsSync(CERT_PATH));
+const testWithValidCert = hasValidCert ? test : test.skip;
 
 describe('NzDriver - SSL Tests', () => {
 
-    test('BasicTests - Valid Cert Connects and Queries', async () => {
+    testWithValidCert('BasicTests - Valid Cert Connects and Queries', async () => {
         const sslConfig = {
             ...config,
             securityLevel: 'OnlySecuredSession',
@@ -51,7 +55,7 @@ describe('NzDriver - SSL Tests', () => {
     }, 30000); // 30s timeout
 
     test('BasicTests - Invalid Cert Throws', async () => {
-        const dummyCert = "D:\\DEV\\Others\\keys\\dummy-invalid.pem";
+        const dummyCert = path.join(os.tmpdir(), `dummy-invalid-${process.pid}-${Date.now()}.pem`);
         fs.writeFileSync(dummyCert, "-----BEGIN CERTIFICATE-----\nMIIDwTCCAqmgAwIBAgIJAJ......\n-----END CERTIFICATE-----"); // Garbage/Truncated PEM
 
         const sslConfig = {

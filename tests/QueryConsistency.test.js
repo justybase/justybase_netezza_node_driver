@@ -41,6 +41,26 @@ function getTypeName(val) {
 
 const selectWithVsWithoutTableCases = [
     [
+        "SELECT true::BOOLEAN FROM JUST_DATA..DIMDATE LIMIT 1",
+        "SELECT true::BOOLEAN"
+    ],
+    [
+        "SELECT '2024-12-11'::DATE FROM JUST_DATA..DIMDATE LIMIT 1",
+        "SELECT '2024-12-11'::DATE"
+    ],
+    [
+        "SELECT '2024-12-11 14:30:00'::TIMESTAMP FROM JUST_DATA..DIMDATE LIMIT 1",
+        "SELECT '2024-12-11 14:30:00'::TIMESTAMP"
+    ],
+    [
+        "SELECT 123.456::NUMERIC(10,3) FROM JUST_DATA..DIMDATE LIMIT 1",
+        "SELECT 123.456::NUMERIC(10,3)"
+    ],
+    [
+        "SELECT 3.1400::NUMERIC(10,4) FROM JUST_DATA..DIMDATE LIMIT 1",
+        "SELECT 3.1400::NUMERIC(10,4)"
+    ],
+    [
         "SELECT '2 years 5 hours 11 months 41 minutes 15 sec'::interval FROM JUST_DATA..DIMDATE LIMIT 1",
         "SELECT '2 years 5 hours 11 months 41 minutes 15 sec'::interval"
     ],

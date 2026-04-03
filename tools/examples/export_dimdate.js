@@ -1,4 +1,5 @@
-const { NzConnection } = require('./dist/NzConnection');
+const { NzConnection } = require('../../dist');
+const os = require('os');
 const path = require('path');
 const fs = require('fs');
 
@@ -10,12 +11,12 @@ const config = {
     password: process.env.NZ_DEV_PASSWORD || 'password'
 };
 
-const OUTPUT_DIR = 'd:\\TMP';
+const OUTPUT_DIR = process.env.NZ_LOCAL_TMP_DIR || path.join(os.tmpdir(), 'justybase-netezza-driver');
 const OUTPUT_FILE = path.join(OUTPUT_DIR, 'dimdate_export.dat');
 
 // Ensure output directory exists
 if (!fs.existsSync(OUTPUT_DIR)) {
-    try { fs.mkdirSync(OUTPUT_DIR); } catch (e) { }
+    try { fs.mkdirSync(OUTPUT_DIR, { recursive: true }); } catch (e) { }
 }
 
 // Remove file if it already exists (External Table CREATE fails if file exists)

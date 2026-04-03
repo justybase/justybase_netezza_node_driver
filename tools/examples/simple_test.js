@@ -2,7 +2,7 @@
  * Simple test - SELECT 1 (no table, should work with text format)
  */
 
-const { NzConnection } = require('./dist/NzConnection');
+const { NzConnection } = require('../../dist');
 
 const config = {
     host: '192.168.0.144',

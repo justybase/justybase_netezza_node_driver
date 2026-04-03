@@ -264,7 +264,7 @@ describe('NzDriver - Boolean Type', () => {
         const reader = await cmd.executeReader();
         expect(await reader.read()).toBe(true);
         const val = reader.getValue(0);
-        expect(val === true || val === 't' || val === '1').toBe(true);
+        expect(val).toBe(true);
     });
 
     test('SELECT boolean true (from table)', async () => {
@@ -279,7 +279,7 @@ describe('NzDriver - Boolean Type', () => {
         const reader = await cmd.executeReader();
         expect(await reader.read()).toBe(true);
         const val = reader.getValue(0);
-        expect(val === false || val === 'f' || val === '0').toBe(true);
+        expect(val).toBe(false);
     });
 
     test('SELECT boolean false (from table)', async () => {
@@ -307,13 +307,8 @@ describe('NzDriver - Date/Time Types', () => {
         const reader = await cmd.executeReader();
         expect(await reader.read()).toBe(true);
         const val = reader.getValue(0);
-        if (val instanceof Date) {
-            expect(val.getUTCFullYear()).toBe(2024);
-            expect(val.getUTCMonth()).toBe(11); // December
-            expect(val.getUTCDate()).toBe(11);
-        } else {
-            expect(val.toString()).toContain('2024-12-11');
-        }
+        expect(val instanceof Date).toBe(true);
+        expect(val.toISOString()).toBe('2024-12-11T00:00:00.000Z');
     });
 
     test('SELECT date (from table)', async () => {
@@ -321,13 +316,8 @@ describe('NzDriver - Date/Time Types', () => {
         const reader = await cmd.executeReader();
         expect(await reader.read()).toBe(true);
         const val = reader.getValue(0);
-        if (val instanceof Date) {
-            expect(val.getUTCFullYear()).toBe(2024);
-            expect(val.getUTCMonth()).toBe(11);
-            expect(val.getUTCDate()).toBe(11);
-        } else {
-            expect(val.toString()).toContain('2024-12-11');
-        }
+        expect(val instanceof Date).toBe(true);
+        expect(val.toISOString()).toBe('2024-12-11T00:00:00.000Z');
     });
 
     test('SELECT time (loose)', async () => {
@@ -358,7 +348,8 @@ describe('NzDriver - Date/Time Types', () => {
         const reader = await cmd.executeReader();
         expect(await reader.read()).toBe(true);
         const val = reader.getValue(0);
-        expect(val.toString()).toContain('2024');
+        expect(val instanceof Date).toBe(true);
+        expect(val.toISOString()).toBe('2024-12-11T14:30:00.000Z');
     });
 
     test('SELECT timestamp (from table)', async () => {
@@ -380,8 +371,8 @@ describe('NzDriver - Date/Time Types', () => {
         const reader = await cmd.executeReader();
         expect(await reader.read()).toBe(true);
         const val = reader.getValue(0);
-        // Text format returns string without T/Z suffix
-        expect(val.toString()).toBe('2023-03-26 01:30:00');
+        expect(val instanceof Date).toBe(true);
+        expect(val.toISOString()).toBe('2023-03-26T01:30:00.000Z');
     });
 
     test('SELECT timestamp 2023-03-26 01:30:00 (from table)', async () => {
@@ -399,8 +390,8 @@ describe('NzDriver - Date/Time Types', () => {
         const reader = await cmd.executeReader();
         expect(await reader.read()).toBe(true);
         const val = reader.getValue(0);
-        // Text format returns string without T/Z suffix
-        expect(val.toString()).toBe('2023-03-31 12:30:00');
+        expect(val instanceof Date).toBe(true);
+        expect(val.toISOString()).toBe('2023-03-31T12:30:00.000Z');
     });
 
     test('SELECT timestamp 2023-03-31 12:30:00 (from table)', async () => {
@@ -418,8 +409,8 @@ describe('NzDriver - Date/Time Types', () => {
         const reader = await cmd.executeReader();
         expect(await reader.read()).toBe(true);
         const val = reader.getValue(0);
-        // Text format returns string without T/Z suffix
-        expect(val.toString()).toBe('2023-03-01 12:30:00');
+        expect(val instanceof Date).toBe(true);
+        expect(val.toISOString()).toBe('2023-03-01T12:30:00.000Z');
     });
 
     test('SELECT timestamp 2023-03-01 12:30:00 (from table)', async () => {
@@ -437,8 +428,8 @@ describe('NzDriver - Date/Time Types', () => {
         const reader = await cmd.executeReader();
         expect(await reader.read()).toBe(true);
         const val = reader.getValue(0);
-        // Text format returns string
-        expect(val.toString()).toBe('2023-03-01');
+        expect(val instanceof Date).toBe(true);
+        expect(val.toISOString()).toBe('2023-03-01T00:00:00.000Z');
     });
 
     test('SELECT date 2023-03-01 (from table)', async () => {

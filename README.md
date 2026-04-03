@@ -26,7 +26,7 @@ npm install @justybase/netezza-driver
 ## Quick Start
 
 ```typescript
-import { NzConnection, NzCommand } from '@justybase/netezza-driver';
+import { NzConnection } from '@justybase/netezza-driver';
 
 async function example() {
     const connection = new NzConnection({
@@ -37,21 +37,22 @@ async function example() {
         // port: 5480, // default
     });
 
-    try {
-        await connection.open();
-        
-        const command = new NzCommand('SELECT * FROM _v_table WHERE tablename LIKE ?', connection);
-        command.parameters.push('CUSTOMER%');
+    await connection.connect();
 
-        const reader = await command.executeReader();
-        
-        while (await reader.read()) {
-            const tableName = reader.getValue(0);
-            console.log(`Found table: ${tableName}`);
+    try {
+        const reader = await connection
+            .createCommand('SELECT TABLENAME FROM _V_TABLE ORDER BY TABLENAME LIMIT 5')
+            .executeReader();
+
+        try {
+            while (await reader.read()) {
+                console.log(`Found table: ${reader.getString(0)}`);
+            }
+        } finally {
+            await reader.close();
         }
-        
     } finally {
-        await connection.close();
+        connection.close();
     }
 }
 ```
@@ -66,7 +67,9 @@ Important: this project is an independent TypeScript implementation and does not
 
 ## Testing
 
-This package has two types of tests:
+This package has two types of tests.
+
+Repository CI and local test tooling are currently validated on Node 22.x because the ODBC comparison dependency in the dev toolchain now requires Node >=20. The published package `engines` field remains `>=18.0.0`.
 
 ### Smoke Tests (Fast)
 
@@ -123,6 +126,8 @@ For **full tests**, you need:
    # Linux/macOS
    export NZ_DEV_PASSWORD=your_password
    ```
+3. For the optional valid-certificate SSL test, set `NZ_SSL_CERT_PATH` to a trusted server certificate file. If it is not set, that one SSL test is skipped while the rest of the suite still runs.
+4. External-table tests and example scripts use `NZ_LOCAL_TMP_DIR` when it is set. Otherwise they fall back to the operating system temp directory.
 
 ### Other Test Commands
 
@@ -133,6 +138,59 @@ npm run test:debug
 # Run specific test file
 npx jest tests/BasicTests.test.js --config jest.config.js --runInBand
 ```
+
+## Column Metadata
+
+Use the public metadata methods on `NzDataReader` when you need server type information. This avoids reaching into the internal `columnDescriptions` array just to recover provider OIDs, modifiers, or declared lengths.
+
+```typescript
+const reader = await connection
+    .createCommand(`
+        SELECT
+            'AA'::NVARCHAR(32) AS NVC,
+            CURRENT_DATE AS CD
+        FROM JUST_DATA..DIMACCOUNT
+        LIMIT 1
+    `)
+    .executeReader();
+
+const metadata = reader.getColumnMetadata(0);
+console.log(metadata.typeName); // NVARCHAR
+console.log(metadata.declaredTypeName); // NVARCHAR(32)
+console.log(metadata.providerType); // 2530
+console.log(metadata.typeModifier); // 48
+console.log(metadata.declaredLength); // 32
+
+console.log(reader.getProviderType(1)); // 1082
+console.log(reader.getTypeName(1)); // DATE
+```
+
+For compatibility, `getTypeName()` continues to return canonical base names such as `VARCHAR`, `NVARCHAR`, `NCHAR`, `DATE`, and `TIMESTAMPTZ`. Use `getDeclaredTypeName()` or `getColumnMetadata()` when you also need declared lengths like `VARCHAR(32)`.
+
+## Value Conversion
+
+Starting in `2.0.0`, loose text-protocol queries and table-backed binary queries use the same JavaScript value contract whenever the server provides a known type OID.
+
+```typescript
+const reader = await connection
+    .createCommand(`
+        SELECT
+            true::BOOLEAN AS ok,
+            '2024-12-11'::DATE AS d,
+            '2024-12-11 14:30:00'::TIMESTAMP AS ts,
+            12345::BIGINT AS id
+    `)
+    .executeReader();
+
+await reader.read();
+
+console.log(reader.getValue(0)); // true
+console.log(reader.getValue(1) instanceof Date); // true
+console.log(reader.getValue(2) instanceof Date); // true
+console.log(typeof reader.getValue(3)); // bigint
+```
+
+The main mappings are `BOOL -> boolean`, `BYTEINT`/`INT2`/`INT4`/`OID -> number`, `INT8 -> bigint`, `DATE`/`TIMESTAMP`/`TIMESTAMPTZ`/`ABSTIME -> Date`, `TIME -> TimeValue`, and `NUMERIC -> number | string` using the existing precision-preserving rule. Character types remain strings, and `INTERVAL`/`TIMETZ` remain string-formatted values. For schema inspection, `INT8` columns now report `DataType === BigInt` so metadata matches the runtime value contract.
 
 ## Build
 

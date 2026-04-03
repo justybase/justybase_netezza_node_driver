@@ -2,7 +2,7 @@
 const fs = require('fs');
 const path = require('path');
 const odbc = require('odbc');
-const { NzConnection } = require('./dist/NzConnection');
+const { NzConnection } = require('../../dist');
 
 const config = {
     host: '192.168.0.144',
@@ -99,7 +99,7 @@ async function verifySpecificQuery(conn, odbcConn, sql) {
     const reader = await cmd.executeReader();
     // reader.read() loop to get all rows
     const jsRows = [];
-    while (reader.read()) {
+    while (await reader.read()) {
         const row = [];
         for (let i = 0; i < reader.fieldCount; i++) {
             row.push(reader.getValue(i));

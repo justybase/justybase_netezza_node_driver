@@ -1,4 +1,5 @@
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const { NzConnection } = require('../dist/NzConnection');
 
@@ -10,7 +11,7 @@ const config = {
     password: process.env.NZ_DEV_PASSWORD || 'password'
 };
 
-const TEMP_DIR = 'd:\\TMP';
+const TEMP_DIR = process.env.NZ_LOCAL_TMP_DIR || path.join(os.tmpdir(), 'justybase-netezza-driver');
 const TEST_FILE = path.join(TEMP_DIR, 'js_et_test.dat');
 
 // Helper to read single value from a query
@@ -42,6 +43,7 @@ describe('NzDriver - External Tables', () => {
     let conn;
 
     beforeAll(async () => {
+        fs.mkdirSync(TEMP_DIR, { recursive: true });
         conn = new NzConnection(config);
         await conn.connect();
 

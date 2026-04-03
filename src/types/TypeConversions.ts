@@ -157,10 +157,174 @@ export function timestampRecvInt(data: Buffer): Date {
     return new Date(seconds * 1000);
 }
 
-// Numeric conversion constants
-const MAX_NUMERIC_DIGIT_COUNT = 4;
-const NUMERIC_MAX_PRECISION = 38;
-const SIGN_MASK = 0x80000000;
+const TYPE_MOD_OFFSET = 16;
+type TextValueParser = (value: string) => unknown;
+
+function parseBigIntText(value: string): bigint {
+    return BigInt(value.trim());
+}
+
+function parseNumberText(value: string): number {
+    return Number(value.trim());
+}
+
+function parseTimeText(value: string): TimeValue | null {
+    return parseTimeString(value.trim());
+}
+
+function passthroughText(value: string): string {
+    return value;
+}
+
+function parseBooleanText(value: string): boolean {
+    const normalized = value.trim().toLowerCase();
+    return normalized === 't' || normalized === 'true' || normalized === '1';
+}
+
+function parseNumericTypeModifier(typeMod: number): { precision: number; scale: number } {
+    if (typeMod > TYPE_MOD_OFFSET) {
+        const normalized = typeMod - TYPE_MOD_OFFSET;
+        return {
+            precision: normalized >> 16,
+            scale: normalized & 0xffff,
+        };
+    }
+    return { precision: 0, scale: 0 };
+}
+
+function parseNumericText(value: string, typeMod: number): number | string {
+    const trimmed = value.trim();
+    const numeric = Number(trimmed);
+    const { precision } = parseNumericTypeModifier(typeMod);
+
+    if (!Number.isNaN(numeric) && Number.isFinite(numeric)) {
+        if (precision === 0) {
+            if (/^-?\d+(\.\d+)?$/.test(trimmed) && trimmed === String(numeric)) {
+                return numeric;
+            }
+        } else if (precision <= 15 && trimmed === String(numeric)) {
+            return numeric;
+        }
+    }
+
+    return trimmed;
+}
+
+function parseDateText(value: string): Date {
+    return new Date(`${value.trim()}T00:00:00.000Z`);
+}
+
+function normalizeTimestampText(value: string): string | null {
+    const trimmed = value.trim();
+
+    if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
+        return `${trimmed}T00:00:00.000Z`;
+    }
+
+    const match = trimmed.match(/^([0-9]{4}-[0-9]{2}-[0-9]{2})[ T]([0-9]{2}:[0-9]{2}:[0-9]{2})(\.[0-9]+)?(?:([+-])([0-9]{2})(?::?([0-9]{2}))?)?$/);
+    if (!match) {
+        return null;
+    }
+
+    const [, datePart, timePart, fraction = '', sign, zoneHours, zoneMinutes] = match;
+    const milliseconds = fraction ? `.${fraction.slice(1).padEnd(3, '0').slice(0, 3)}` : '';
+    const timezone = sign ? `${sign}${zoneHours}:${zoneMinutes || '00'}` : 'Z';
+    return `${datePart}T${timePart}${milliseconds}${timezone}`;
+}
+
+function parseTimestampText(value: string): Date {
+    const normalized = normalizeTimestampText(value);
+    if (normalized) {
+        return new Date(normalized);
+    }
+
+    const trimmed = value.trim();
+    const hasTimezone = /(?:[zZ]|[+-][0-9]{2}(?::?[0-9]{2})?)$/.test(trimmed);
+    return new Date(`${trimmed.replace(' ', 'T')}${hasTimezone ? '' : 'Z'}`);
+}
+
+export function createTextValueParser(typeOid: number, typeMod: number = -1): TextValueParser {
+    switch (typeOid) {
+        case 16:
+            return parseBooleanText;
+        case 20:
+            return parseBigIntText;
+        case 21:
+        case 23:
+        case 26:
+        case 700:
+        case 701:
+        case 2500:
+            return parseNumberText;
+        case 702:
+        case 1114:
+        case 1184:
+            return parseTimestampText;
+        case 1082:
+            return parseDateText;
+        case 1083:
+            return parseTimeText;
+        case 1186:
+        case 1266:
+            return passthroughText;
+        case 1700:
+            return (value: string) => parseNumericText(value, typeMod);
+        default:
+            return passthroughText;
+    }
+}
+
+export function parseTextValue(value: string, typeOid: number, typeMod: number = -1): unknown {
+    switch (typeOid) {
+        case 16:
+            return parseBooleanText(value);
+        case 20:
+            return parseBigIntText(value);
+        case 21:
+        case 23:
+        case 26:
+        case 700:
+        case 701:
+        case 2500:
+            return parseNumberText(value);
+        case 702:
+        case 1114:
+        case 1184:
+            return parseTimestampText(value);
+        case 1082:
+            return parseDateText(value);
+        case 1083:
+            return parseTimeText(value);
+        case 1186:
+        case 1266:
+            return value;
+        case 1700:
+            return parseNumericText(value, typeMod);
+        default:
+            return value;
+    }
+}
+
+const NUMERIC_PART_BITS = 32n;
+
+function readSignedNumericBigInt(data: Buffer, partCount: number): bigint {
+    if (partCount <= 0) {
+        return 0n;
+    }
+
+    let raw = 0n;
+    for (let i = 0; i < partCount; i++) {
+        raw = (raw << NUMERIC_PART_BITS) | BigInt(data.readUInt32LE(i * 4));
+    }
+
+    const totalBits = BigInt(partCount) * NUMERIC_PART_BITS;
+    const signBit = 1n << (totalBits - 1n);
+    if ((raw & signBit) !== 0n) {
+        raw -= 1n << totalBits;
+    }
+
+    return raw;
+}
 
 /**
  * Convert Netezza numeric to JavaScript number or string (for high precision)
@@ -170,54 +334,21 @@ const SIGN_MASK = 0x80000000;
  * @param digitCount - number of 32-bit digits
  */
 export function getCsNumeric(data: Buffer, prec: number, scale: number, digitCount: number): number | string {
-    const numParts = prec <= 9 ? 1 : prec <= 18 ? 2 : 4;
+    const partCount = digitCount > 0 ? digitCount : prec <= 9 ? 1 : prec <= 18 ? 2 : 4;
+    let unscaledValue = readSignedNumericBigInt(data, partCount);
+    const isMinus = unscaledValue < 0n;
 
-    // Read 32-bit parts
-    const dataP: number[] = [];
-    for (let i = 0; i < numParts; i++) {
-        dataP.push(data.readUInt32LE(i * 4));
-    }
-
-    // Extend to 4 parts with sign extension
-    const sign = (dataP[0] & SIGN_MASK) !== 0 ? 0xffffffff : 0;
-    const varPdata = new Array<number>(MAX_NUMERIC_DIGIT_COUNT).fill(sign);
-
-    for (let i = MAX_NUMERIC_DIGIT_COUNT - digitCount, j = 0; i < MAX_NUMERIC_DIGIT_COUNT; i++, j++) {
-        varPdata[i] = dataP[j];
-    }
-
-    const isMinus = (varPdata[0] & SIGN_MASK) !== 0;
-
-    // Negate if negative (2's complement)
     if (isMinus) {
-        negate128(varPdata);
+        unscaledValue = -unscaledValue;
     }
 
-    // Convert to decimal string
-    const digits = new Array<number>(NUMERIC_MAX_PRECISION).fill(0);
-    for (let i = 0; i < NUMERIC_MAX_PRECISION; i++) {
-        digits[NUMERIC_MAX_PRECISION - i - 1] = div10_128(varPdata);
-    }
-
-    // Build result string
-    let result = '';
-    let leadingZero = true;
-
-    for (let j = 0; j < NUMERIC_MAX_PRECISION; j++) {
-        if (j < NUMERIC_MAX_PRECISION - scale - 1 && leadingZero && digits[j] === 0) {
-            continue;
-        }
-        leadingZero = false;
-        result += String(digits[j]);
-    }
-
-    if (result === '') result = '0';
+    let result = unscaledValue.toString();
 
     // Insert decimal point
     if (scale !== 0) {
-        const intPart = result.slice(0, -scale) || '0';
-        const decPart = result.slice(-scale).padStart(scale, '0');
-        result = intPart + '.' + decPart;
+        const padded = result.padStart(scale + 1, '0');
+        const decimalStart = padded.length - scale;
+        result = padded.slice(0, decimalStart) + '.' + padded.slice(decimalStart);
     }
 
     if (isMinus) {
@@ -230,42 +361,4 @@ export function getCsNumeric(data: Buffer, prec: number, scale: number, digitCou
         return num;
     }
     return result;
-}
-
-/**
- * Divide 128-bit number by 10
- * @param numerator - 4 x 32-bit parts
- * @returns remainder
- */
-function div10_128(numerator: number[]): number {
-    let remainder = 0;
-    for (let i = 0; i < MAX_NUMERIC_DIGIT_COUNT; i++) {
-        const work = numerator[i] + remainder * 0x100000000;
-        if (work !== 0) {
-            numerator[i] = Math.floor(work / 10);
-            remainder = work % 10;
-        } else {
-            numerator[i] = 0;
-            remainder = 0;
-        }
-    }
-    return remainder;
-}
-
-/**
- * Negate 128-bit number (2's complement)
- * @param data - 4 x 32-bit parts
- */
-function negate128(data: number[]): void {
-    // 1's complement
-    for (let i = 0; i < MAX_NUMERIC_DIGIT_COUNT; i++) {
-        data[i] = ~data[i] >>> 0;
-    }
-    // Add 1
-    let carry = 1;
-    for (let i = MAX_NUMERIC_DIGIT_COUNT - 1; i >= 0 && carry; i--) {
-        const sum = data[i] + carry;
-        data[i] = sum >>> 0;
-        carry = sum > 0xffffffff ? 1 : 0;
-    }
 }

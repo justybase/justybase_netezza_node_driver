@@ -64,19 +64,7 @@ describe('GetSchemaTableTests', () => {
         const schemaTable = reader.getSchemaTable();
         await reader.close();
 
-        // Note: Our implementation currently defaults AllowDBNull to true because RowDescription doesn't carry not-null info
-        // So this test might fail if we strictly expect false. 
-        // C# implementation likely queries system catalog or uses updated protocol.
-        // For now, I will comment out the assertion or expect true if that's what we have, 
-        // BUT the goal is to port tests. If it fails, I'll know I need more logic.
-        // I'll leave the check but expect it to be true for now since I haven't implemented catalog lookup.
-        // Or I should acknowledge mapped behavior.
-        // Reference code expects false.
-        // expect(schemaTable.Rows[0].AllowDBNull).toBe(false); 
-        // Update: I know I implemented default true. So I expect true for now, 
-        // or I should flag this as a known limitation/future work in the plan.
-        // I will assert true and add a comment.
-        expect(schemaTable.Rows[0].AllowDBNull).toBe(true);
+        expect(schemaTable.Rows[0].AllowDBNull).toBe(false);
     });
 
     test('GetSchemaTable_TextColumnSizes', async () => {
@@ -141,6 +129,78 @@ describe('GetSchemaTableTests', () => {
         }
     });
 
+    test('GetSchemaTable_UnicodeMetadataMatchesLiveNetezza', async () => {
+        const cmd = connection.createCommand(`
+            SELECT
+                'AA'::VARCHAR(32) AS VC,
+                'AA'::NVARCHAR(32) AS NVC,
+                'AA'::NCHAR(8) AS NC,
+                'AA'::NATIONAL CHARACTER VARYING(32) AS NCV,
+                CURRENT_DATE AS CD,
+                CURRENT_TIMESTAMP AS CTS
+            FROM JUST_DATA..DIMACCOUNT
+            LIMIT 1
+        `);
+        const reader = await cmd.executeReader();
+        const schemaTable = reader.getSchemaTable();
+
+        expect(reader.getProviderType(0)).toBe(1043);
+        expect(reader.getProviderType(1)).toBe(2530);
+        expect(reader.getProviderType(2)).toBe(2522);
+        expect(reader.getProviderType(3)).toBe(2530);
+        expect(reader.getProviderType(4)).toBe(1082);
+        expect(reader.getProviderType(5)).toBe(1184);
+
+        expect(reader.getTypeName(0)).toBe('VARCHAR');
+        expect(reader.getTypeName(1)).toBe('NVARCHAR');
+        expect(reader.getTypeName(2)).toBe('NCHAR');
+        expect(reader.getTypeName(3)).toBe('NVARCHAR');
+        expect(reader.getTypeName(4)).toBe('DATE');
+        expect(reader.getTypeName(5)).toBe('TIMESTAMPTZ');
+
+        expect(reader.getDeclaredTypeName(0)).toBe('VARCHAR(32)');
+        expect(reader.getDeclaredTypeName(1)).toBe('NVARCHAR(32)');
+        expect(reader.getDeclaredTypeName(2)).toBe('NCHAR(8)');
+        expect(reader.getDeclaredTypeName(3)).toBe('NVARCHAR(32)');
+        expect(reader.getDeclaredTypeName(4)).toBe('DATE');
+        expect(reader.getDeclaredTypeName(5)).toBe('TIMESTAMPTZ');
+
+        expect(reader.getTypeModifier(0)).toBe(48);
+        expect(reader.getTypeModifier(1)).toBe(48);
+        expect(reader.getTypeModifier(2)).toBe(24);
+        expect(reader.getTypeModifier(3)).toBe(48);
+        expect(reader.getTypeLength(4)).toBe(4);
+        expect(reader.getTypeLength(5)).toBe(8);
+
+        expect(schemaTable.Rows[0].ColumnSize).toBe(32);
+        expect(schemaTable.Rows[1].ColumnSize).toBe(32);
+        expect(schemaTable.Rows[2].ColumnSize).toBe(8);
+        expect(schemaTable.Rows[3].ColumnSize).toBe(32);
+        expect(schemaTable.Rows[4].DataType).toBe(Date);
+        expect(schemaTable.Rows[5].DataType).toBe(Date);
+        expect(schemaTable.Rows[0].DataType).toBe(String);
+        expect(schemaTable.Rows[1].DataType).toBe(String);
+        expect(schemaTable.Rows[2].DataType).toBe(String);
+        expect(schemaTable.Rows[3].DataType).toBe(String);
+
+        expect(await reader.read()).toBe(true);
+        expect(typeof reader.getValue(0)).toBe('string');
+        expect(typeof reader.getValue(1)).toBe('string');
+        expect(typeof reader.getValue(2)).toBe('string');
+        expect(typeof reader.getValue(3)).toBe('string');
+        expect(reader.getValue(4)).toBeInstanceOf(Date);
+        expect(reader.getValue(5)).toBeInstanceOf(Date);
+
+        const nvcMetadata = reader.getColumnMetadata(1);
+        const ncMetadata = reader.getColumnMetadata(2);
+        expect(nvcMetadata.declaredLength).toBe(32);
+        expect(nvcMetadata.typeName).toBe('NVARCHAR');
+        expect(ncMetadata.declaredLength).toBe(8);
+        expect(ncMetadata.typeName).toBe('NCHAR');
+
+        await reader.close();
+    });
+
     test('NumericPrecisionScaleTest', async () => {
         // Reduced scope for speed compared to C# loop
         // C# loops 1..38 precision. Let's pick a few key ones.
@@ -184,7 +244,7 @@ describe('GetSchemaTableTests', () => {
         expect(rows['COMPUTED_INT'].DataType).toBe(Number);
         expect(rows['COMPUTED_STRING'].DataType).toBe(String);
         expect(rows['COMPUTED_CASE'].DataType).toBe(String);
-        expect(rows['COMPUTED_WINDOW'].DataType).toBe(Number); // bigint
+        expect(rows['COMPUTED_WINDOW'].DataType).toBe(BigInt);
         // expect(rows['COMPUTED_DATE'].DataType).toBe(Date); // Date + Interval -> Timestamp/Date?
         // Note: Date + Interval might be Timestamp or Date. Let's check what we get.
         expect(rows['COMPUTED_NUMERIC'].DataType).toBe(Number);

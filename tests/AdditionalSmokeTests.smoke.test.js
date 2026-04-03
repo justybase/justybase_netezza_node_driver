@@ -117,9 +117,8 @@ describe('Additional Smoke Tests - Expressions & Functions', () => {
             const reader = await cmd.executeReader();
             expect(await reader.read()).toBe(true);
             const val = reader.getValue(0);
-            // Boolean may come as 't'/'f' string or actual boolean
-            const result = typeof val === 'boolean' ? val : (val === 't' || val === true);
-            expect(result).toBe(expected);
+            expect(typeof val).toBe('boolean');
+            expect(val).toBe(expected);
             await reader.close();
         });
     });
@@ -141,8 +140,8 @@ describe('Additional Smoke Tests - Expressions & Functions', () => {
             const reader = await cmd.executeReader();
             expect(await reader.read()).toBe(true);
             const val = reader.getValue(0);
-            const result = typeof val === 'boolean' ? val : (val === 't' || val === true);
-            expect(result).toBe(expected);
+            expect(typeof val).toBe('boolean');
+            expect(val).toBe(expected);
             await reader.close();
         });
     });
@@ -168,17 +167,27 @@ describe('Additional Smoke Tests - Expressions & Functions', () => {
 
     describe('Type Casting', () => {
         test.each([
-            ["SELECT '123'::INT", 123],
-            ["SELECT '2024-01-01'::DATE", '2024'],
-            ["SELECT 123::VARCHAR(10)", '123'],
-        ])('Cast: %s', async (query, expected) => {
+            ["SELECT '123'::INT", 123, 'number'],
+            ["SELECT '2024-01-01'::DATE", '2024-01-01', 'date'],
+            ["SELECT 123::VARCHAR(10)", '123', 'string'],
+        ])('Cast: %s', async (query, expected, expectedType) => {
             const cmd = conn.createCommand(query);
             const reader = await cmd.executeReader();
-            expect(await reader.read()).toBe(true);
-            const val = reader.getValue(0);
-            const result = typeof expected === 'number' ? Number(val) : String(val);
-            expect(typeof expected === 'number' ? result : result.substring(0, 4)).toBe(expected);
-            await reader.close();
+            try {
+                expect(await reader.read()).toBe(true);
+                const val = reader.getValue(0);
+
+                if (expectedType === 'number') {
+                    expect(Number(val)).toBe(expected);
+                } else if (expectedType === 'date') {
+                    expect(val).toBeInstanceOf(Date);
+                    expect(val.toISOString().slice(0, 10)).toBe(expected);
+                } else {
+                    expect(String(val)).toBe(expected);
+                }
+            } finally {
+                await reader.close();
+            }
         });
     });
 });
@@ -222,6 +231,85 @@ describe('Additional Smoke Tests - Connection & State', () => {
         const reader = await cmd.executeReader();
         expect(reader.fieldCount).toBe(3);
         await reader.close();
+    });
+
+    test('Unicode metadata stays string-like on live appliance', async () => {
+        const cmd = conn.createCommand(`
+            SELECT
+                'AA'::VARCHAR(32) AS VC,
+                'AA'::NVARCHAR(32) AS NVC,
+                'AA'::NCHAR(8) AS NC,
+                'AA'::NATIONAL CHARACTER VARYING(32) AS NCV,
+                CURRENT_DATE AS CD,
+                CURRENT_TIMESTAMP AS CTS
+            FROM JUST_DATA..DIMACCOUNT
+            LIMIT 1
+        `);
+        const reader = await cmd.executeReader();
+        const schema = reader.getSchemaTable();
+
+        expect(reader.getProviderType(0)).toBe(1043);
+        expect(reader.getProviderType(1)).toBe(2530);
+        expect(reader.getProviderType(2)).toBe(2522);
+        expect(reader.getProviderType(3)).toBe(2530);
+        expect(reader.getProviderType(4)).toBe(1082);
+
+        expect(reader.getTypeName(0)).toBe('VARCHAR');
+        expect(reader.getTypeName(1)).toBe('NVARCHAR');
+        expect(reader.getTypeName(2)).toBe('NCHAR');
+        expect(reader.getTypeName(3)).toBe('NVARCHAR');
+        expect(reader.getTypeName(4)).toBe('DATE');
+
+        expect(reader.getColumnMetadata(1).declaredTypeName).toBe('NVARCHAR(32)');
+        expect(reader.getColumnMetadata(2).declaredTypeName).toBe('NCHAR(8)');
+        expect(schema.Rows[1].DataType).toBe(String);
+        expect(schema.Rows[2].DataType).toBe(String);
+        expect(schema.Rows[4].DataType).toBe(Date);
+
+        expect(await reader.read()).toBe(true);
+        expect(typeof reader.getValue(0)).toBe('string');
+        expect(typeof reader.getValue(1)).toBe('string');
+        expect(typeof reader.getValue(2)).toBe('string');
+        expect(typeof reader.getValue(3)).toBe('string');
+        expect(reader.getValue(4)).toBeInstanceOf(Date);
+        expect(reader.getValue(5)).toBeInstanceOf(Date);
+
+        await reader.close();
+    });
+
+    test('Special provider OIDs from live appliance are classified consistently', async () => {
+        const byteIntReader = await conn.createCommand(`SELECT 1::BYTEINT AS B FROM ${TEST_TABLE} LIMIT 1`).executeReader();
+        const byteIntSchema = byteIntReader.getSchemaTable();
+
+        expect(byteIntReader.getProviderType(0)).toBe(2500);
+        expect(byteIntReader.getTypeName(0)).toBe('BYTEINT');
+        expect(byteIntReader.getDeclaredTypeName(0)).toBe('BYTEINT');
+        expect(byteIntSchema.Rows[0].DataType).toBe(Number);
+        expect(byteIntSchema.Rows[0].ColumnSize).toBe(1);
+
+        await byteIntReader.close();
+
+        const systemReader = await conn.createCommand(`
+            SELECT OBJID, CREATEDATE, OBJCLASS
+            FROM JUST_DATA.._V_TABLE
+            ORDER BY TABLENAME
+            LIMIT 1
+        `).executeReader();
+        const systemSchema = systemReader.getSchemaTable();
+
+        expect(systemReader.getProviderType(0)).toBe(26);
+        expect(systemReader.getTypeName(0)).toBe('OID');
+        expect(systemSchema.Rows[0].DataType).toBe(Number);
+
+        expect(systemReader.getProviderType(1)).toBe(702);
+        expect(systemReader.getTypeName(1)).toBe('ABSTIME');
+        expect(systemSchema.Rows[1].DataType).toBe(Date);
+
+        expect(systemReader.getProviderType(2)).toBe(26);
+        expect(systemReader.getTypeName(2)).toBe('OID');
+        expect(systemSchema.Rows[2].DataType).toBe(Number);
+
+        await systemReader.close();
     });
 });
 

@@ -26,6 +26,22 @@ interface SchemaRow {
     IsLong: boolean;
 }
 
+interface ColumnMetadata {
+    index: number;
+    name: string;
+    providerType: number;
+    typeModifier: number;
+    typeLength: number;
+    typeName: string;
+    declaredTypeName: string;
+    declaredLength: number | null;
+    numericPrecision: number;
+    numericScale: number;
+    dataType: (...args: unknown[]) => unknown;
+    columnSize: number;
+    isLong: boolean;
+}
+
 /**
  * Generator item from response
  */
@@ -33,6 +49,7 @@ interface GeneratorItem {
     type: string;
     row?: unknown[];
     columns?: ColumnDescription[];
+    desc?: { fieldNullAllowed: boolean[] };
     message?: string;
 }
 
@@ -57,7 +74,11 @@ const Oid = {
     Int2: 21,
     Int4: 23,
     Text: 25,
-    ShowDate: 2530,
+    Oid: 26,
+    AbsTime: 702,
+    ByteInt: 2500,
+    NChar: 2522,
+    NVarChar: 2530,
     BpChar: 1042,
     VarChar: 1043,
     Date: 1082,
@@ -87,23 +108,29 @@ class NzDataReader {
 
     private _nameIndex: Record<string, number> = {};
     private _pendingColumns: ColumnDescription[] | null = null;
+    private _pendingNullability: boolean[] | null = null;
     private _isFinished: boolean = false;
     private _nextItem: GeneratorItem | null;
     private _hasRows: boolean;
+    private _columnNullability: boolean[] | null;
+    private _columnMetadataCache: Array<ColumnMetadata | null> = [];
+    private _columnNames: string[] = [];
 
     constructor(
         command: NzCommand,
         generator: AsyncGenerator<GeneratorItem>,
         columns: ColumnDescription[] | null,
+        columnNullability: boolean[] | null,
         releaseCallback: (() => void) | null,
         initialNextItem: GeneratorItem | null
     ) {
         this.command = command;
         this.generator = generator;
-        this.columnDescriptions = columns || [];
+        this.columnDescriptions = [];
+        this._columnNullability = null;
         this.releaseCallback = releaseCallback;
 
-        this._initNameIndex();
+        this._setColumnState(columns, columnNullability);
         this._nextItem = initialNextItem;
         this._hasRows = !!(this._nextItem && this._nextItem.type === 'DataRow');
     }
@@ -125,17 +152,259 @@ class NzDataReader {
         this._isFinished = true;
         this._nextItem = null;
         this._hasRows = false;
+        this._pendingNullability = null;
         if (this.releaseCallback) {
             this.releaseCallback();
             this.releaseCallback = null;
         }
     }
 
+    private _cloneNullability(nullability: boolean[] | null | undefined): boolean[] | null {
+        if (!nullability || nullability.length === 0) {
+            return null;
+        }
+        return [...nullability];
+    }
+
+    private _setColumnState(columns: ColumnDescription[] | null, nullability: boolean[] | null): void {
+        this.columnDescriptions = columns || [];
+        this._columnNullability = this._cloneNullability(nullability);
+        this._columnMetadataCache = new Array(this.columnDescriptions.length).fill(null);
+        this._columnNames = this.columnDescriptions.map((column) => column.name);
+        this._initNameIndex();
+    }
+
+    private _getColumnAllowsNull(i: number): boolean {
+        if (!this._columnNullability || i >= this._columnNullability.length) {
+            return true;
+        }
+        return this._columnNullability[i];
+    }
+
+    private _getColumnDescription(i: number): ColumnDescription {
+        if (i < 0 || i >= this.columnDescriptions.length) {
+            throw new Error(`Column ordinal ${i} is out of range`);
+        }
+        return this.columnDescriptions[i];
+    }
+
+    private _isCharacterType(oid: number): boolean {
+        switch (oid) {
+            case 15:
+            case Oid.Char:
+            case Oid.Name:
+            case Oid.Text:
+            case Oid.BpChar:
+            case Oid.VarChar:
+            case Oid.NChar:
+            case Oid.NVarChar:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    private _getTypeNameFromOid(oid: number): string {
+        switch (oid) {
+            case Oid.Bool:
+                return 'BOOL';
+            case Oid.Bytea:
+                return 'BYTEA';
+            case Oid.ByteInt:
+                return 'BYTEINT';
+            case Oid.Char:
+                return 'CHAR';
+            case Oid.Name:
+                return 'NAME';
+            case Oid.Int8:
+                return 'INT8';
+            case Oid.Int2:
+                return 'INT2';
+            case Oid.Int4:
+                return 'INT4';
+            case Oid.Oid:
+                return 'OID';
+            case Oid.Text:
+                return 'TEXT';
+            case Oid.NChar:
+                return 'NCHAR';
+            case Oid.BpChar:
+                return 'CHAR';
+            case Oid.VarChar:
+                return 'VARCHAR';
+            case Oid.NVarChar:
+                return 'NVARCHAR';
+            case Oid.AbsTime:
+                return 'ABSTIME';
+            case Oid.Date:
+                return 'DATE';
+            case Oid.Time:
+                return 'TIME';
+            case Oid.Timestamp:
+                return 'TIMESTAMP';
+            case Oid.TimestampTz:
+                return 'TIMESTAMPTZ';
+            case Oid.Interval:
+                return 'INTERVAL';
+            case Oid.TimeTz:
+                return 'TIMETZ';
+            case Oid.Numeric:
+                return 'NUMERIC';
+            case Oid.Float4:
+                return 'FLOAT4';
+            case Oid.Float8:
+                return 'FLOAT8';
+            case 15:
+                return 'CHAR';
+            default:
+                return `UNKNOWN(${oid})`;
+        }
+    }
+
+    private _getNumericPrecisionScale(typeMod: number): { precision: number; scale: number } {
+        if (typeMod > TYPE_MOD_OFFSET) {
+            const normalized = typeMod - TYPE_MOD_OFFSET;
+            return {
+                precision: normalized >> 16,
+                scale: normalized & 0xffff,
+            };
+        }
+        return { precision: 0, scale: 0 };
+    }
+
+    private _getCharacterDeclaredLength(col: ColumnDescription): number | null {
+        if (!this._isCharacterType(col.typeOid)) {
+            return null;
+        }
+        if (col.typeMod > TYPE_MOD_OFFSET) {
+            return col.typeMod - TYPE_MOD_OFFSET;
+        }
+        return null;
+    }
+
+    private _formatDeclaredTypeName(
+        oid: number,
+        typeName: string,
+        declaredLength: number | null,
+        numericPrecision: number,
+        numericScale: number
+    ): string {
+        switch (oid) {
+            case Oid.BpChar:
+            case Oid.VarChar:
+            case Oid.NChar:
+            case Oid.NVarChar:
+                return declaredLength !== null ? `${typeName}(${declaredLength})` : typeName;
+            case Oid.Numeric:
+                return numericPrecision > 0 ? `NUMERIC(${numericPrecision},${numericScale})` : typeName;
+            default:
+                return typeName;
+        }
+    }
+
+    private _getResolvedColumnMetadata(col: ColumnDescription, index: number): ColumnMetadata {
+        const oid = col.typeOid;
+        const typeName = this._getTypeNameFromOid(oid);
+        const declaredLength = this._getCharacterDeclaredLength(col);
+        const numeric = this._getNumericPrecisionScale(col.typeMod);
+
+        let columnSize = col.typeLen > 0 ? col.typeLen : -1;
+        let numericPrecision = 0;
+        let numericScale = 0;
+        let dataType: (...args: unknown[]) => unknown = String;
+
+        switch (oid) {
+            case Oid.Bool:
+                dataType = Boolean;
+                columnSize = 1;
+                break;
+            case Oid.ByteInt:
+                dataType = Number;
+                columnSize = 1;
+                break;
+            case Oid.Int2:
+                dataType = Number;
+                columnSize = 2;
+                break;
+            case Oid.Int4:
+                dataType = Number;
+                columnSize = 4;
+                break;
+            case Oid.Int8:
+                dataType = BigInt as unknown as (...args: unknown[]) => unknown;
+                columnSize = 8;
+                break;
+            case Oid.Oid:
+                dataType = Number;
+                columnSize = col.typeLen > 0 ? col.typeLen : 4;
+                break;
+            case Oid.Float4:
+            case Oid.Float8:
+                dataType = Number;
+                columnSize = oid === Oid.Float8 ? 8 : 4;
+                numericPrecision = oid === Oid.Float8 ? 53 : 24;
+                break;
+            case Oid.Numeric:
+                dataType = Number;
+                numericPrecision = numeric.precision;
+                numericScale = numeric.scale;
+                if (numericPrecision > 0) {
+                    columnSize = Math.floor(numericPrecision / 2) + 1;
+                    if (columnSize < col.typeLen && col.typeLen > 0) {
+                        columnSize = col.typeLen;
+                    }
+                } else {
+                    columnSize = col.typeLen > 0 ? col.typeLen : -1;
+                }
+                break;
+            case Oid.Date:
+            case Oid.AbsTime:
+            case Oid.Timestamp:
+            case Oid.TimestampTz:
+            case Oid.Time:
+            case Oid.TimeTz:
+                dataType = oid === Oid.Time || oid === Oid.TimeTz ? Object : Date;
+                columnSize = col.typeLen > 0 ? col.typeLen : oid === Oid.AbsTime ? 4 : -1;
+                break;
+            case 15:
+            case Oid.Char:
+            case Oid.BpChar:
+            case Oid.VarChar:
+            case Oid.Text:
+            case Oid.Name:
+            case Oid.NChar:
+            case Oid.NVarChar:
+                dataType = String;
+                columnSize = declaredLength ?? (col.typeLen > 0 ? col.typeLen : -1);
+                break;
+            default:
+                dataType = String;
+                columnSize = col.typeLen > 0 ? col.typeLen : -1;
+                break;
+        }
+
+        return {
+            index,
+            name: col.name,
+            providerType: oid,
+            typeModifier: col.typeMod,
+            typeLength: col.typeLen,
+            typeName,
+            declaredTypeName: this._formatDeclaredTypeName(oid, typeName, declaredLength, numericPrecision, numericScale),
+            declaredLength,
+            numericPrecision,
+            numericScale,
+            dataType,
+            columnSize,
+            isLong: columnSize > 8000,
+        };
+    }
+
     async nextResult(): Promise<boolean> {
         if (this._pendingColumns) {
-            this.columnDescriptions = this._pendingColumns;
+            this._setColumnState(this._pendingColumns, this._pendingNullability);
             this._pendingColumns = null;
-            this._initNameIndex();
+            this._pendingNullability = null;
             this.currentRow = null;
 
             while (true) {
@@ -184,8 +453,7 @@ class NzDataReader {
             const val = res.value;
 
             if (val.type === 'RowDescription') {
-                this.columnDescriptions = val.columns!;
-                this._initNameIndex();
+                this._setColumnState(val.columns!, null);
                 this.currentRow = null;
                 continue;
             }
@@ -193,8 +461,9 @@ class NzDataReader {
             if (val.type === 'RowDescriptionStandard') {
                 const ps = this.command._preparedStatement;
                 if (this.columnDescriptions.length === 0 && ps && ps.description) {
-                    this.columnDescriptions = ps.description;
-                    this._initNameIndex();
+                    this._setColumnState(ps.description, val.desc?.fieldNullAllowed ?? null);
+                } else {
+                    this._columnNullability = this._cloneNullability(val.desc?.fieldNullAllowed ?? null);
                 }
                 this.currentRow = null;
                 continue;
@@ -226,150 +495,53 @@ class NzDataReader {
 
         const table: SchemaRow[] = [];
         for (let i = 0; i < this.columnDescriptions.length; i++) {
-            const col = this.columnDescriptions[i];
+            const metadata = this.getColumnMetadata(i);
             const row: SchemaRow = {
-                ColumnName: col.name,
+                ColumnName: metadata.name,
                 ColumnOrdinal: i + 1,
-                ColumnSize: -1,
-                NumericPrecision: 0,
-                NumericScale: 0,
-                DataType: String,
-                ProviderType: col.typeOid,
-                AllowDBNull: true,
+                ColumnSize: metadata.columnSize,
+                NumericPrecision: metadata.numericPrecision,
+                NumericScale: metadata.numericScale,
+                DataType: metadata.dataType,
+                ProviderType: metadata.providerType,
+                AllowDBNull: this._getColumnAllowsNull(i),
                 IsReadOnly: true,
-                IsLong: false,
+                IsLong: metadata.isLong,
             };
-
-            const mod = col.typeMod;
-            const oid = col.typeOid;
-
-            switch (oid) {
-                case Oid.Bool:
-                    row.DataType = Boolean;
-                    row.ColumnSize = 1;
-                    break;
-                case Oid.Int2:
-                    row.DataType = Number;
-                    row.ColumnSize = 2;
-                    break;
-                case Oid.Int4:
-                    row.DataType = Number;
-                    row.ColumnSize = 4;
-                    break;
-                case Oid.Int8:
-                    row.DataType = Number;
-                    row.ColumnSize = 8;
-                    break;
-                case Oid.Float4:
-                case Oid.Float8:
-                    row.DataType = Number;
-                    row.ColumnSize = oid === Oid.Float8 ? 8 : 4;
-                    row.NumericPrecision = oid === Oid.Float8 ? 53 : 24;
-                    break;
-                case Oid.Numeric:
-                    row.DataType = Number;
-                    if (mod > TYPE_MOD_OFFSET) {
-                        const p = (mod - TYPE_MOD_OFFSET) >> 16;
-                        const s = (mod - TYPE_MOD_OFFSET) & 0xffff;
-                        row.NumericPrecision = p;
-                        row.NumericScale = s;
-                        row.ColumnSize = Math.floor(p / 2) + 1;
-                        if (row.ColumnSize < col.typeLen && col.typeLen > 0) row.ColumnSize = col.typeLen;
-                    } else {
-                        row.ColumnSize = col.typeLen;
-                    }
-                    break;
-                case Oid.Date:
-                case Oid.Timestamp:
-                case Oid.TimestampTz:
-                case Oid.Time:
-                case Oid.TimeTz:
-                    row.DataType = Date;
-                    if (oid === Oid.Time || oid === Oid.TimeTz) {
-                        row.DataType = Object;
-                    }
-                    row.ColumnSize = col.typeLen;
-                    break;
-                case Oid.Char:
-                case Oid.BpChar:
-                case Oid.VarChar:
-                case Oid.Text:
-                case Oid.Name:
-                case Oid.ShowDate:
-                    row.DataType = String;
-                    if (mod > TYPE_MOD_OFFSET) {
-                        row.ColumnSize = mod - TYPE_MOD_OFFSET;
-                    } else {
-                        row.ColumnSize = -1;
-                        if (col.typeLen > 0) row.ColumnSize = col.typeLen;
-                    }
-                    if (row.ColumnSize > 8000) row.IsLong = true;
-                    break;
-                default:
-                    row.DataType = String;
-                    row.ColumnSize = col.typeLen;
-                    break;
-            }
             table.push(row);
         }
         return { Rows: table, Columns: { Count: table.length } };
     }
 
     getTypeName(i: number): string {
-        if (i < 0 || i >= this.columnDescriptions.length) {
-            throw new Error(`Column ordinal ${i} is out of range`);
-        }
-        const col = this.columnDescriptions[i];
-        const oid = col.typeOid;
+        return this.getColumnMetadata(i).typeName;
+    }
 
-        switch (oid) {
-            case Oid.Bool:
-                return 'BOOL';
-            case Oid.Bytea:
-                return 'BYTEA';
-            case Oid.Char:
-                return 'CHAR';
-            case Oid.Name:
-                return 'NAME';
-            case Oid.Int8:
-                return 'INT8';
-            case Oid.Int2:
-                return 'INT2';
-            case Oid.Int4:
-                return 'INT4';
-            case Oid.Text:
-                return 'TEXT';
-            case Oid.BpChar:
-                return 'CHAR';
-            case Oid.VarChar:
-                return 'VARCHAR';
-            case Oid.Date:
-                return 'DATE';
-            case Oid.Time:
-                return 'TIME';
-            case Oid.Timestamp:
-                return 'TIMESTAMP';
-            case Oid.TimestampTz:
-                return 'TIMESTAMPTZ';
-            case Oid.Interval:
-                return 'INTERVAL';
-            case Oid.TimeTz:
-                return 'TIMETZ';
-            case Oid.Numeric:
-                return 'NUMERIC';
-            case Oid.Float4:
-                return 'FLOAT4';
-            case Oid.Float8:
-                return 'FLOAT8';
-            case 2530:
-                return 'DATE';
-            case 15:
-                return 'CHAR';
-            case 16:
-                return 'BOOL';
-            default:
-                return `UNKNOWN(${oid})`;
+    getDeclaredTypeName(i: number): string {
+        return this.getColumnMetadata(i).declaredTypeName;
+    }
+
+    getProviderType(i: number): number {
+        return this.getColumnMetadata(i).providerType;
+    }
+
+    getTypeModifier(i: number): number {
+        return this.getColumnMetadata(i).typeModifier;
+    }
+
+    getTypeLength(i: number): number {
+        return this.getColumnMetadata(i).typeLength;
+    }
+
+    getColumnMetadata(i: number): ColumnMetadata {
+        const cached = this._columnMetadataCache[i];
+        if (cached) {
+            return cached;
         }
+
+        const metadata = this._getResolvedColumnMetadata(this._getColumnDescription(i), i);
+        this._columnMetadataCache[i] = metadata;
+        return metadata;
     }
 
     async read(): Promise<boolean> {
@@ -399,6 +571,7 @@ class NzDataReader {
 
             if (val.type === 'RowDescription') {
                 this._pendingColumns = val.columns!;
+                this._pendingNullability = null;
                 this.currentRow = null;
                 return false;
             }
@@ -406,6 +579,7 @@ class NzDataReader {
             if (val.type === 'RowDescriptionStandard') {
                 const ps = this.command._preparedStatement;
                 this._pendingColumns = ps && ps.description ? ps.description : this.columnDescriptions;
+                this._pendingNullability = this._cloneNullability(val.desc?.fieldNullAllowed ?? null);
                 this.currentRow = null;
                 return false;
             }
@@ -554,8 +728,8 @@ class NzDataReader {
     getRowObject(): Record<string, unknown> | null {
         if (!this.currentRow) return null;
         const obj: Record<string, unknown> = {};
-        for (let i = 0; i < this.columnDescriptions.length; i++) {
-            obj[this.columnDescriptions[i].name] = this.currentRow[i];
+        for (let i = 0; i < this._columnNames.length; i++) {
+            obj[this._columnNames[i]] = this.currentRow[i];
         }
         return obj;
     }
@@ -604,4 +778,4 @@ class NzDataReader {
     }
 }
 
-export { NzDataReader, ColumnDescription, GeneratorItem };
+export { NzDataReader, ColumnDescription, ColumnMetadata, GeneratorItem };

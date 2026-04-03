@@ -1,8 +1,9 @@
 const { run, bench, group } = require('mitata');
 const odbc = require('odbc');
-const { NzConnection } = require('./dist/NzConnection');
+const { NzConnection } = require('../../dist');
 const { connect: nzConnect } = require('node-netezza');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const { performance } = require('perf_hooks');
 
@@ -18,13 +19,13 @@ const connectionString = `DRIVER={NetezzaSQL};SERVER=${config.host};PORT=${confi
 
 const QUERY = "SELECT * FROM JUST_DATA..FACTPRODUCTINVENTORY ORDER BY ROWID LIMIT 100000";
 const TABLE_FOR_EXPORT = "JUST_DATA..FACTPRODUCTINVENTORY";
-const TEMP_DIR = 'd:\\TMP';
+const TEMP_DIR = process.env.NZ_LOCAL_TMP_DIR || path.join(os.tmpdir(), 'justybase-netezza-driver');
 const EXT_FILE_JS = path.join(TEMP_DIR, 'bench_js.dat');
 const EXT_FILE_ODBC = path.join(TEMP_DIR, 'bench_odbc.dat');
 
 // Ensure temp dir exists
 if (!fs.existsSync(TEMP_DIR)) {
-    try { fs.mkdirSync(TEMP_DIR); } catch (e) { }
+    try { fs.mkdirSync(TEMP_DIR, { recursive: true }); } catch (e) { }
 }
 
 async function main() {

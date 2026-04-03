@@ -80,6 +80,9 @@ type ResponseMessage =
     | { type: 'CommandComplete'; text: string; rowsAffected: number }
     | { type: 'ReadyForQuery' };
 
+type TextValueParser = (value: string) => unknown;
+type BinaryFieldParser = (fieldData: Buffer) => unknown;
+
 class NzConnection extends EventEmitter {
     config: NzConnectionConfig;
     private _socket: net.Socket | null = null;
@@ -89,6 +92,8 @@ class NzConnection extends EventEmitter {
     private _commandNumber: number = -1;
     private _connected: boolean = false;
     private _rowDescription: ColumnInfo[] | null = null;
+    private _textColumnParsers: TextValueParser[] | null = null;
+    private _binaryFieldParsers: BinaryFieldParser[] | null = null;
     private _rows: unknown[] = [];
     private _tupdesc: DbosTupleDesc = new DbosTupleDesc();
     private _tmpBuffer: Buffer = Buffer.alloc(65536);
@@ -537,6 +542,7 @@ class NzConnection extends EventEmitter {
 
             const generator = this._responseGenerator(command);
             let columns: ColumnInfo[] = [];
+            let columnNullability: boolean[] | null = null;
 
             let item = await generator.next();
             let error: Error | null = null;
@@ -546,12 +552,16 @@ class NzConnection extends EventEmitter {
                 const val = item.value;
                 if (val.type === 'RowDescription') {
                     columns = val.columns!;
+                    columnNullability = null;
                 } else if (val.type === 'RowDescriptionStandard') {
                     const desc = val.desc;
-                    if (desc && desc.numFields > 0 && columns.length === 0) {
-                        const ps = command._preparedStatement;
-                        if (ps && ps.description) {
-                            columns = ps.description;
+                    if (desc && desc.numFields > 0) {
+                        columnNullability = [...desc.fieldNullAllowed];
+                        if (columns.length === 0) {
+                            const ps = command._preparedStatement;
+                            if (ps && ps.description) {
+                                columns = ps.description;
+                            }
                         }
                     }
                 } else if (val.type === 'DataRow' || val.type === 'CommandComplete' || val.type === 'ReadyForQuery') {
@@ -575,6 +585,7 @@ class NzConnection extends EventEmitter {
                 command,
                 generator as AsyncGenerator<GeneratorItem>,
                 columns as ColumnDescription[] | null,
+                columnNullability,
                 () => {
                     this._executing = false;
                 },
@@ -608,6 +619,8 @@ class NzConnection extends EventEmitter {
     private async *_responseGenerator(command: NzCommand): AsyncGenerator<ResponseMessage> {
         this._rows = [];
         this._rowDescription = null;
+        this._textColumnParsers = null;
+        this._binaryFieldParsers = null;
 
         let completed = false;
 
@@ -725,6 +738,7 @@ class NzConnection extends EventEmitter {
                 const len = await this._readInt32();
                 const data = await this._readBytes(len);
                 this._tupdesc.parse(data, command._preparedStatement);
+                this._binaryFieldParsers = this._buildBinaryFieldParsers();
                 yield { type: 'RowDescriptionStandard', desc: this._tupdesc };
                 continue;
             }
@@ -1046,6 +1060,10 @@ class NzConnection extends EventEmitter {
             debug('Column', i, ':', name, 'typeOid:', typeOid, 'typeLen:', typeLen);
         }
 
+        this._textColumnParsers = this._rowDescription.map((column) =>
+            TypeConversions.createTextValueParser(column.typeOid, column.typeMod)
+        );
+
         if (command) command._preparedStatement = { description: this._rowDescription };
     }
 
@@ -1053,7 +1071,7 @@ class NzConnection extends EventEmitter {
         const numberOfCol = this._rowDescription!.length;
         const bitmapLen = Math.ceil(numberOfCol / 8);
         let dataIdx = bitmapLen;
-        const row: unknown[] = [];
+        const row = new Array(numberOfCol);
 
         for (let columnNumber = 0; columnNumber < numberOfCol; columnNumber++) {
             const byteToTest = data[Math.floor(columnNumber / 8)];
@@ -1061,7 +1079,7 @@ class NzConnection extends EventEmitter {
             const hasValue = (byteToTest & (1 << positionInByte)) !== 0;
 
             if (!hasValue) {
-                row.push(null);
+                row[columnNumber] = null;
                 continue;
             }
 
@@ -1070,20 +1088,17 @@ class NzConnection extends EventEmitter {
             const actualLen = vlen - 4;
 
             if (actualLen <= 0) {
-                row.push(null);
+                row[columnNumber] = null;
                 continue;
             }
 
             const colDesc = this._rowDescription![columnNumber];
-            const typeOid = colDesc?.typeOid;
-
             const value = data.toString('utf8', dataIdx, dataIdx + actualLen);
+            const parser = this._textColumnParsers?.[columnNumber];
 
-            if (typeOid === 1083) {
-                row.push(TypeConversions.parseTimeString(value));
-            } else {
-                row.push(value);
-            }
+            row[columnNumber] = parser
+                ? parser(value)
+                : TypeConversions.parseTextValue(value, colDesc?.typeOid, colDesc?.typeMod ?? -1);
             dataIdx += actualLen;
         }
         return row;
@@ -1094,18 +1109,108 @@ class NzConnection extends EventEmitter {
         await this._readBytes(4);
         const rowLength = PGUtil.readInt32(await this._readBytes(4));
         const data = await this._readBytes(rowLength);
+        const parsers = this._binaryFieldParsers;
         const row = new Array(numFields);
+
         for (let i = 0; i < numFields; i++) {
             if (this._columnIsNull(data, i)) {
                 row[i] = null;
                 continue;
             }
+
             const fieldData = this._cTableFieldAt(data, i);
+            const parser = parsers?.[i];
+
+            if (parser) {
+                row[i] = parser(fieldData);
+                continue;
+            }
+
             const fldType = this._tupdesc.fieldType[i];
             const fldLen = this._tupdesc.fieldSize[i];
             row[i] = this._parseFieldByType(fieldData, fldType, fldLen, i);
         }
+
         return row;
+    }
+
+    private _buildBinaryFieldParsers(): BinaryFieldParser[] {
+        const numFields = this._tupdesc.numFields;
+        const parsers = new Array<BinaryFieldParser>(numFields);
+
+        for (let i = 0; i < numFields; i++) {
+            const fldType = this._tupdesc.fieldType[i];
+            const fldLen = this._tupdesc.fieldSize[i];
+
+            switch (fldType) {
+                case NzType.NzTypeChar:
+                    parsers[i] = (fieldData: Buffer) => fieldData.toString('latin1', 0, fldLen).trimEnd();
+                    break;
+                case NzType.NzTypeNChar:
+                case NzType.NzTypeNVarChar:
+                    parsers[i] = (fieldData: Buffer) => {
+                        const cursize = fieldData.readInt16LE(0) - 2;
+                        return fieldData.toString('utf8', 2, 2 + cursize);
+                    };
+                    break;
+                case NzType.NzTypeVarChar:
+                case NzType.NzTypeVarFixedChar:
+                    parsers[i] = (fieldData: Buffer) => {
+                        const cursize = fieldData.readInt16LE(0) - 2;
+                        return fieldData.toString('latin1', 2, 2 + cursize);
+                    };
+                    break;
+                case NzType.NzTypeInt8:
+                    parsers[i] = (fieldData: Buffer) => fieldData.readBigInt64LE(0);
+                    break;
+                case NzType.NzTypeInt:
+                    parsers[i] = (fieldData: Buffer) => fieldData.readInt32LE(0);
+                    break;
+                case NzType.NzTypeInt2:
+                    parsers[i] = (fieldData: Buffer) => fieldData.readInt16LE(0);
+                    break;
+                case NzType.NzTypeInt1:
+                    parsers[i] = (fieldData: Buffer) => fieldData.readInt8(0);
+                    break;
+                case NzType.NzTypeDouble:
+                    parsers[i] = (fieldData: Buffer) => fieldData.readDoubleLE(0);
+                    break;
+                case NzType.NzTypeFloat:
+                    parsers[i] = (fieldData: Buffer) => fieldData.readFloatLE(0);
+                    break;
+                case NzType.NzTypeDate:
+                    parsers[i] = TypeConversions.toDateTimeFrom4Bytes;
+                    break;
+                case NzType.NzTypeTime:
+                    parsers[i] = TypeConversions.timeRecvFloat;
+                    break;
+                case NzType.NzTypeInterval:
+                    parsers[i] = TypeConversions.intervalRecvFloat;
+                    break;
+                case NzType.NzTypeTimeTz:
+                    parsers[i] = (fieldData: Buffer) => TypeConversions.timetzOutput(fieldData, fldLen);
+                    break;
+                case NzType.NzTypeTimestamp:
+                    parsers[i] = TypeConversions.toDateTimeFrom8Bytes;
+                    break;
+                case NzType.NzTypeBool:
+                    parsers[i] = (fieldData: Buffer) => fieldData[0] === 0x01;
+                    break;
+                case NzType.NzTypeNumeric: {
+                    const precision = this._tupdesc.getFieldPrecision(i);
+                    const scale = this._tupdesc.getFieldScale(i);
+                    const digitCount = this._tupdesc.getNumericDigitCount(i);
+                    parsers[i] = (fieldData: Buffer) =>
+                        TypeConversions.getCsNumeric(fieldData, precision, scale, digitCount);
+                    break;
+                }
+                default:
+                    parsers[i] = (fieldData: Buffer) => fieldData.toString('utf8', 0, fldLen);
+                    break;
+            }
+        }
+
+        return parsers;
     }
 
     private _parseFieldByType(fieldData: Buffer, fldType: number, fldLen: number, fieldIdx: number): unknown {
@@ -1161,17 +1266,17 @@ class NzConnection extends EventEmitter {
 
     private _columnIsNull(data: Buffer, fieldLf: number): boolean {
         if (!this._tupdesc.nullsAllowed) return false;
-        const col = this._tupdesc.fieldPhysField[fieldLf];
-        const byte = data[2 + Math.floor(col / 8)];
-        return (byte & (1 << (col % 8))) !== 0;
+        const byteOffset = this._tupdesc.fieldNullByteOffset[fieldLf];
+        const bitMask = this._tupdesc.fieldNullBitMask[fieldLf];
+        return (data[byteOffset] & bitMask) !== 0;
     }
 
     private _cTableFieldAt(data: Buffer, i: number): Buffer {
-        if (this._tupdesc.fieldFixedSize[i] !== 0) return data.slice(this._tupdesc.fieldOffset[i]);
-        let p = data.slice(this._tupdesc.fixedFieldsSize);
+        if (this._tupdesc.fieldFixedSize[i] !== 0) return data.subarray(this._tupdesc.fieldOffset[i]);
+        let p = data.subarray(this._tupdesc.fixedFieldsSize);
         for (let j = 0; j < this._tupdesc.fieldOffset[i]; j++) {
             const l = p.readInt16LE(0);
-            p = p.slice(l % 2 === 0 ? l : l + 1);
+            p = p.subarray(l % 2 === 0 ? l : l + 1);
         }
         return p;
     }
