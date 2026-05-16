@@ -30,6 +30,8 @@ class NzCommand {
     _recordsAffected: number;
     commandTimeout: number;
     _preparedStatement?: PreparedStatement;
+    /** Server notices/warnings collected during the last execution */
+    _notices: string[] = [];
 
     constructor(connection: NzConnection) {
         this.connection = connection;
@@ -39,16 +41,24 @@ class NzCommand {
         this.commandTimeout = connection.commandTimeout !== undefined ? connection.commandTimeout : 30; // Default 30s, 0 = no timeout
     }
 
+    /** Server notices/warnings collected during the last execution */
+    get notices(): readonly string[] {
+        return this._notices;
+    }
+
     async execute(): Promise<boolean> {
+        this._notices = [];
         return this.connection.execute(this, false);
     }
 
     async executeNonQuery(): Promise<number> {
+        this._notices = [];
         await this.connection.execute(this, false);
         return this._recordsAffected;
     }
 
     async executeReader(): Promise<NzDataReader> {
+        this._notices = [];
         return this.connection.executeReader(this);
     }
 

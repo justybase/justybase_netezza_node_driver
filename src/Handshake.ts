@@ -3,6 +3,7 @@ import * as os from 'os';
 import * as net from 'net';
 import * as tls from 'tls';
 import * as fs from 'fs';
+import * as path from 'path';
 import { PGUtil } from './utils/PGUtil';
 import { BackendMessageCode, HandshakeCode, ProtocolVersion } from './protocol/constants';
 
@@ -13,6 +14,12 @@ interface HandshakeOptions {
     securityLevel?: 'PreferredUnsecured' | 'OnlyUnsecuredSession' | 'PreferredSecuredSession' | 'OnlySecuredSession';
     sslCerFilePath?: string;
     rejectUnauthorized?: boolean;
+    /** Application name reported to Netezza for Guardium audit / system table visibility */
+    appName?: string;
+    /** OS user name reported to Netezza */
+    osUser?: string;
+    /** Client hostname reported to Netezza */
+    clientHostName?: string;
 }
 
 type Stream = net.Socket | tls.TLSSocket;
@@ -44,9 +51,9 @@ class Handshake {
         this._options = options;
 
         this._guardiumClientOS = process.platform;
-        this._guardiumClientOSUser = process.env.USERNAME || process.env.USER || 'unknown';
-        this._guardiumAppName = 'scJs-Driver';
-        this._guardiumClientHostName = os.hostname();
+        this._guardiumClientOSUser = options.osUser || process.env.USERNAME || process.env.USER || 'unknown';
+        this._guardiumAppName = options.appName || path.basename(process.argv[1] || 'node');
+        this._guardiumClientHostName = options.clientHostName || os.hostname();
     }
 
     async startup(database: string, user: string, password: string): Promise<Stream> {
@@ -406,23 +413,33 @@ class Handshake {
         }
         if (areq === 5) {
             // MD5
-            const salt = await this.readBytes(2);
-            const pwdBytes = Buffer.from(password, 'utf8');
-            const hash = crypto
-                .createHash('md5')
-                .update(Buffer.concat([salt, pwdBytes]))
-                .digest('base64');
-            const trimmedHash = hash.replace(/=+$/, '');
-
-            const finalPwdBytes = Buffer.from(trimmedHash, 'utf8');
-            const len = 4 + finalPwdBytes.length + 1;
-            PGUtil.writeInt32(this._stream, len);
-            this._stream.write(finalPwdBytes);
-            this._stream.write(Buffer.from([0]));
-            return true;
+            return this._hashAuthenticate('md5', password);
+        }
+        if (areq === 6) {
+            // SHA256
+            return this._hashAuthenticate('sha256', password);
         }
 
+        debug(`Unsupported authentication type: ${areq}`);
         return false;
+    }
+
+    private async _hashAuthenticate(algorithm: string, password: string): Promise<boolean> {
+        debug(`Using ${algorithm} authentication`);
+        const salt = await this.readBytes(2);
+        const pwdBytes = Buffer.from(password, 'utf8');
+        const hash = crypto
+            .createHash(algorithm)
+            .update(Buffer.concat([salt, pwdBytes]))
+            .digest('base64');
+        const trimmedHash = hash.replace(/=+$/, '');
+
+        const finalPwdBytes = Buffer.from(trimmedHash, 'utf8');
+        const len = 4 + finalPwdBytes.length + 1;
+        PGUtil.writeInt32(this._stream, len);
+        this._stream.write(finalPwdBytes);
+        this._stream.write(Buffer.from([0]));
+        return true;
     }
 
     async readString(): Promise<string> {

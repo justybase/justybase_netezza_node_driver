@@ -415,7 +415,10 @@ class NzDataReader {
                     break;
                 }
                 const val = nextRes.value;
-                if (val.type === 'RowDescriptionStandard') {
+                if (val.type === 'NoticeResponse') {
+                    this.command._notices.push(val.message || '');
+                    continue;
+                } else if (val.type === 'RowDescriptionStandard') {
                     continue;
                 } else if (val.type === 'DataRow') {
                     this._nextItem = val;
@@ -476,6 +479,11 @@ class NzDataReader {
             }
 
             if (val.type === 'CommandComplete') {
+                continue;
+            }
+
+            if (val.type === 'NoticeResponse') {
+                this.command._notices.push(val.message || '');
                 continue;
             }
 
@@ -586,6 +594,11 @@ class NzDataReader {
 
             if (val.type === 'CommandComplete') {
                 this.currentRow = null;
+                continue;
+            }
+
+            if (val.type === 'NoticeResponse') {
+                this.command._notices.push(val.message || '');
                 continue;
             }
 
@@ -745,6 +758,9 @@ class NzDataReader {
             if (!this._isFinished && this.generator) {
                 try {
                     for await (const val of this.generator) {
+                        if (val.type === 'NoticeResponse') {
+                            this.command._notices.push(val.message || '');
+                        }
                         if (val.type === 'ReadyForQuery') break;
                     }
                 } catch {

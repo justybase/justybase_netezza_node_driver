@@ -1,6 +1,6 @@
 {
   "name": "@justybase/netezza-driver",
-  "version": "2.0.1",
+  "version": "2.1.0",
   "description": "Native TypeScript driver for IBM Netezza / PureData System for Analytics",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -56,7 +56,7 @@
     "debug": "^4.4.3"
   },
   "devDependencies": {
-    "@eslint/js": "^9.39.2",
+    "@eslint/js": "^10.0.1",
     "@types/debug": "^4.1.12",
     "@types/node": "^25.2.3",
     "eslint": "^10.0.1",
@@ -67,11 +67,11 @@
     "prettier": "^3.0.0",
     "rimraf": "^6.1.2",
     "ts-jest": "^29.2.0",
-    "typescript": "^5.9.3",
+    "typescript": "^6.0.3",
     "typescript-eslint": "^8.55.0"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=22.0.0"
   },
   "publishConfig": {
     "access": "public"

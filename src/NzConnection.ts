@@ -60,6 +60,12 @@ export interface NzConnectionConfig {
     sslCerFilePath?: string;
     rejectUnauthorized?: boolean;
     connectionTimeout?: number; // Connection timeout in seconds (default: 30)
+    /** Application name reported to Netezza for Guardium audit / system table visibility */
+    appName?: string;
+    /** OS user name reported to Netezza */
+    osUser?: string;
+    /** Client hostname reported to Netezza */
+    clientHostName?: string;
 }
 
 interface ColumnInfo {
@@ -78,6 +84,7 @@ type ResponseMessage =
     | { type: 'RowDescriptionStandard'; desc: DbosTupleDesc }
     | { type: 'DataRow'; row: unknown[] }
     | { type: 'CommandComplete'; text: string; rowsAffected: number }
+    | { type: 'NoticeResponse'; message: string }
     | { type: 'ReadyForQuery' };
 
 type TextValueParser = (value: string) => unknown;
@@ -485,11 +492,15 @@ class NzConnection extends EventEmitter {
             this._preExecution(command.commandText);
 
             let error: Error | null = null;
+            const notices: string[] = [];
             for await (const msg of this._responseGenerator(command)) {
                 if (msg.type === 'ErrorResponse') {
                     error = new Error('Netezza Error: ' + msg.message);
+                } else if (msg.type === 'NoticeResponse') {
+                    notices.push(msg.message);
                 }
             }
+            command._notices = notices;
             if (error) throw error;
             return true;
         } finally {
@@ -547,6 +558,7 @@ class NzConnection extends EventEmitter {
             let item = await generator.next();
             let error: Error | null = null;
             let initialNextItem: ResponseMessage | null = null;
+            const notices: string[] = [];
 
             while (!item.done) {
                 const val = item.value;
@@ -571,10 +583,14 @@ class NzConnection extends EventEmitter {
                     }
                 } else if (val.type === 'ErrorResponse') {
                     error = new Error('Netezza Error: ' + val.message);
+                } else if (val.type === 'NoticeResponse') {
+                    notices.push(val.message);
                 }
 
                 item = await generator.next();
             }
+
+            command._notices = notices;
 
             if (error) {
                 this._executing = false;
@@ -753,7 +769,9 @@ class NzConnection extends EventEmitter {
                 const len = await this._readInt32();
                 const data = await this._readBytes(len);
                 const message = data.toString('utf8').replace(/\0/g, '').trim();
+                debug(`Notice: ${message}`);
                 this.emit('notice', { message });
+                yield { type: 'NoticeResponse', message };
                 continue;
             }
 
