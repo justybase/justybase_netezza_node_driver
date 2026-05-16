@@ -14,7 +14,8 @@ It allows for direct connection to IBM Netezza / PureData System for Analytics d
 - **Pure TypeScript**: No native bindings, no ODBC/CLI required.
 - **High Performance**: Optimized for large result sets using internal buffer pooling.
 - **ADO.NET Style API**: Familiar Connection/Command/Reader pattern.
-- **SSL/TLS Support**: Encrypted connections to Netezza/PureData.
+- **Connection Pool**: Built-in connection pool (`NzPool`) with configurable limits, timeouts, and idle management.
+- **Security & Audit**: Supports SSL/TLS, MD5/SHA256 authentication, and Guardium Audit tracking metadata.
 - **Strongly Typed**: Full TypeScript support for configuration and data handling.
 
 ## Installation
@@ -57,6 +58,48 @@ async function example() {
 }
 ```
 
+## Connection Pool (NzPool)
+
+For applications handling multiple requests, it is recommended to use the built-in connection pool to reuse connections and avoid the overhead of establishing new sessions.
+
+```typescript
+import { NzPool } from '@justybase/netezza-driver';
+
+const pool = new NzPool({
+    host: 'your-nz-host',
+    database: 'system',
+    user: 'admin',
+    password: 'password',
+    max: 10,                 // max connections
+    idleTimeoutMillis: 30000 // close idle connections after 30s
+});
+
+async function runQuery() {
+    // Simple query execution: connection is automatically checked out and released
+    const reader = await pool.query('SELECT 1');
+    try {
+        await reader.read();
+        console.log(reader.getValue(0));
+    } finally {
+        // Closing the reader releases the connection back to the pool
+        await reader.close();
+    }
+}
+```
+
+## Guardium Audit Metadata
+
+You can configure metadata that Netezza will report to IBM Guardium or display in system session tables:
+
+```typescript
+const connection = new NzConnection({
+    // ... basic connection info
+    appName: 'MyDataService',        // defaults to process script name
+    osUser: 'service-account',       // defaults to process.env.USER/USERNAME
+    clientHostName: 'worker-node-1'  // defaults to os.hostname()
+});
+```
+
 ## Design & lineage
 
 This driver exposes an API and usage patterns inspired by ADO.NET: connection/command/reader abstractions, predictable lifecycle management, and an explicit approach to connection and command disposal. The design mirrors common C# database client patterns to make the library familiar to developers coming from .NET.
@@ -69,7 +112,7 @@ Important: this project is an independent TypeScript implementation and does not
 
 This package has two types of tests.
 
-Repository CI and local test tooling are currently validated on Node 22.x because the ODBC comparison dependency in the dev toolchain now requires Node >=20. The published package `engines` field remains `>=18.0.0`.
+Repository CI and local test tooling are currently validated on Node 22.x because the ODBC comparison dependency in the dev toolchain now requires Node >=20. The published package `engines` field requires `>=22.0.0`.
 
 ### Smoke Tests (Fast)
 

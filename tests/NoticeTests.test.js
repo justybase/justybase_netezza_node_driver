@@ -41,8 +41,14 @@ describe('NoticeTests', () => {
         const callCmd = connection.createCommand(`CALL ${procName}();`);
         await callCmd.executeNonQuery();
 
+        // Check event emitter path
         expect(notices.length).toBe(2);
         expect(notices[0]).toContain("The customer name is alpha");
         expect(notices[1]).toContain("The customer location is beta");
+        
+        // Check array property path
+        expect(callCmd.notices.length).toBe(2);
+        expect(callCmd.notices[0]).toContain("The customer name is alpha");
+        expect(callCmd.notices[1]).toContain("The customer location is beta");
     }, 30000);
 });
