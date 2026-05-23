@@ -17,6 +17,22 @@ const config = {
 
 const connectionString = `DRIVER={NetezzaSQL};SERVER=${config.host};PORT=${config.port};DATABASE=${config.database};UID=${config.user};PWD=${config.password};`;
 
+const isLinux = process.platform === 'linux';
+
+function repairOdbcWideChars(s) {
+    let r = '';
+    for (let i = 0; i < s.length; i++) {
+        const c = s.charCodeAt(i);
+        if (c > 255) {
+            r += String.fromCharCode(c & 0xFF);
+            r += String.fromCharCode((c >> 8) & 0xFF);
+        } else {
+            r += s[i];
+        }
+    }
+    return r;
+}
+
 // Essential queries covering all major data types (reduced from 190+ to 15)
 const smokeQueries = [
     "SELECT 1",
@@ -94,8 +110,13 @@ async function compareResults(nzReader, odbcResult) {
         expect(nzReader.fieldCount).toBe(odbcRow.length);
 
         for (let j = 0; j < nzReader.fieldCount; j++) {
+            let valOdbcRaw = odbcRow[j];
+            if (isLinux && typeof valOdbcRaw === 'string') {
+                valOdbcRaw = repairOdbcWideChars(valOdbcRaw);
+            }
+
             const valJs = normalize(nzReader.getValue(j));
-            const valOdbc = normalize(odbcRow[j]);
+            const valOdbc = normalize(valOdbcRaw);
 
             if (valJs !== valOdbc) {
                 const nJs = Number(valJs);

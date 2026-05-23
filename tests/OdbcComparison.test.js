@@ -12,34 +12,30 @@ const config = {
 
 const connectionString = `DRIVER={NetezzaSQL};SERVER=${config.host};PORT=${config.port};DATABASE=${config.database};UID=${config.user};PWD=${config.password};`;
 
-// Known issue: node-odbc on Linux has problems with wide character (NCHAR/NVARCHAR) encoding
-// The JS driver works correctly, but ODBC comparison fails on Linux due to node-odbc library limitations
-// See: https://github.com/markdirish/node-odbc/issues (wide char handling on Linux)
 const isLinux = process.platform === 'linux';
 
 /**
- * Check if a query should be skipped on Linux due to NCHAR/NVARCHAR encoding issues
+ * On Linux, node-odbc returns garbled text for NCHAR/NVARCHAR columns because
+ * it interprets the UTF-16LE wide-character bytes as single-byte (Latin-1) 
+ * characters. Each UTF-16LE code unit (2 bytes) is read as two separate chars
+ * in reverse byte order, producing characters like 慂 (U+6142) instead of "Ba".
+ * 
+ * This function reverses the corruption: each character with code > 255 is 
+ * split into two bytes (low and high), yielding the original UTF-16LE string.
+ * Example: "慂慬据⁥桓敥t" -> "Balance Sheet"
  */
-function shouldSkipOnLinux(query) {
-    if (!isLinux) return false;
-    
-    // Skip queries with explicit NCHAR/NVARCHAR casts
-    if (query.match(/::n(char|varchar)/i)) return true;
-    
-    // Skip table queries that contain NVARCHAR columns (known to fail on Linux with ODBC)
-    const tablesWithNVarchar = [
-        'DIMACCOUNT', 'DIMDATE', 'DIMCUSTOMER', 'DIMPRODUCT', 'DIMRESELLER',
-        'DIMPROMOTION', 'DIMSALESTERRITORY', 'DIMEMPLOYEE', 'DIMGEOGRAPHY',
-        'DIMORGANIZATION', 'DIMPRODUCTCATEGORY', 'DIMPRODUCTSUBCATEGORY',
-        'DIMSCENARIO', 'DIMCURRENCY', 'FACTFINANCE',  'FACTINTERNETSALES',
-        'FACTRESELLERSALES', 'FACTSALESQUOTA', 'FACTSURVEYRESPONSE',
-        'FACTADDITIONALINTERNATIONALPRODUCTDESCRIPTION', 'FACTCALLCENTER',
-        'FACTINTERNETSALESREASON', 'FACTPRODUCTINVENTORY', 'FACTCURRENCYRATE',
-        'NEWFACTCURRENCYRATE', 'CUSTOMERADDRESS', 'CUSTOMERDATA', 'DIMDEPARTMENTGROUP',
-        'FACTPRODUCTINVENTORY', '_V_RELATION_COLUMN', 'DIMSALESREASON'
-    ];
-    
-    return tablesWithNVarchar.some(table => query.toUpperCase().includes(table));
+function repairOdbcWideChars(s) {
+    let r = '';
+    for (let i = 0; i < s.length; i++) {
+        const c = s.charCodeAt(i);
+        if (c > 255) {
+            r += String.fromCharCode(c & 0xFF);
+            r += String.fromCharCode((c >> 8) & 0xFF);
+        } else {
+            r += s[i];
+        }
+    }
+    return r;
 }
 
 // Complex query testing many data types
@@ -946,12 +942,14 @@ async function compareResults(nzReader, odbcResult) {
         expect(nzReader.fieldCount).toBe(odbcRow.length);
 
         for (let j = 0; j < nzReader.fieldCount; j++) {
-            const valJsT = nzReader.getValue(j);
-            const valOdbcT = odbcRow[j]
-
+            // On Linux, repair garbled wide-char strings from ODBC before comparison
+            let valOdbcRaw = odbcRow[j];
+            if (isLinux && typeof valOdbcRaw === 'string') {
+                valOdbcRaw = repairOdbcWideChars(valOdbcRaw);
+            }
 
             const valJs = normalize(nzReader.getValue(j));
-            const valOdbc = normalize(odbcRow[j]);
+            const valOdbc = normalize(valOdbcRaw);
 
             if (valJs !== valOdbc) {
                 const nJs = Number(valJs);
@@ -1056,13 +1054,7 @@ function createComparisonTest(getConnections) {
 describe('ODBC vs JsNzDriver Consistency Tests - standard', () => {
     const { getConnections } = createConnectionHooks();
 
-    const filteredQueries = queries.filter(q => !shouldSkipOnLinux(q));
-    
-    if (isLinux) {
-        console.log(`⚠️  Skipping ${queries.length - filteredQueries.length} queries on Linux due to ODBC wide character encoding issues`);
-    }
-
-    test.each(filteredQueries)(
+    test.each(queries)(
         'Query should match ODBC result: %s',
         createComparisonTest(getConnections),
         60000
@@ -1072,13 +1064,7 @@ describe('ODBC vs JsNzDriver Consistency Tests - standard', () => {
 describe('ODBC vs JsNzDriver Consistency Tests - system', () => {
     const { getConnections } = createConnectionHooks();
 
-    const filteredSystemQueries = systemQueries.filter(q => !shouldSkipOnLinux(q));
-    
-    if (isLinux) {
-        console.log(`⚠️  Skipping ${systemQueries.length - filteredSystemQueries.length} system queries on Linux due to ODBC wide character encoding issues`);
-    }
-
-    test.each(filteredSystemQueries)(
+    test.each(systemQueries)(
         'Query should match ODBC result: %s',
         createComparisonTest(getConnections),
         60000

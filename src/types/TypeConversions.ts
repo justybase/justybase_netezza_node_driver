@@ -159,6 +159,57 @@ export function timestampRecvInt(data: Buffer): Date {
 
 const TYPE_MOD_OFFSET = 16;
 type TextValueParser = (value: string) => unknown;
+type TextBufferParser = (data: Buffer, offset: number, len: number) => unknown;
+
+function parseIntFromBuffer(data: Buffer, offset: number, len: number): number {
+    let val = 0;
+    let neg = false;
+    let i = offset;
+    const end = offset + len;
+    if (i < end && data[i] === 45) { neg = true; i++; }
+    while (i < end) {
+        val = val * 10 + (data[i] - 48);
+        i++;
+    }
+    return neg ? -val : val;
+}
+
+function parseBigIntFromBuffer(data: Buffer, offset: number, len: number): bigint {
+    let val = 0n;
+    let neg = false;
+    let i = offset;
+    const end = offset + len;
+    if (i < end && data[i] === 45) { neg = true; i++; }
+    while (i < end) {
+        val = val * 10n + BigInt(data[i] - 48);
+        i++;
+    }
+    return neg ? -val : val;
+}
+
+function parseBooleanFromBuffer(data: Buffer, offset: number): boolean {
+    const b = data[offset];
+    return b === 116 || b === 49;
+}
+
+export function createTextBufferParser(typeOid: number, _typeMod: number = -1): TextBufferParser | null {
+    switch (typeOid) {
+        case 16:
+            return (data, offset) => parseBooleanFromBuffer(data, offset);
+        case 20:
+            return parseBigIntFromBuffer;
+        case 21:
+        case 23:
+        case 26:
+        case 2500:
+            return parseIntFromBuffer;
+        case 700:
+        case 701:
+            return (data, offset, len) => Number(data.toString('ascii', offset, offset + len));
+        default:
+            return null;
+    }
+}
 
 function parseBigIntText(value: string): bigint {
     return BigInt(value.trim());

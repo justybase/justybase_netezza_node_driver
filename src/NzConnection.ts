@@ -88,6 +88,7 @@ type ResponseMessage =
     | { type: 'ReadyForQuery' };
 
 type TextValueParser = (value: string) => unknown;
+type TextBufferParser = (data: Buffer, offset: number, len: number) => unknown;
 type BinaryFieldParser = (fieldData: Buffer) => unknown;
 
 class NzConnection extends EventEmitter {
@@ -100,9 +101,11 @@ class NzConnection extends EventEmitter {
     private _connected: boolean = false;
     private _rowDescription: ColumnInfo[] | null = null;
     private _textColumnParsers: TextValueParser[] | null = null;
+    private _textBufferParsers: (TextBufferParser | null)[] | null = null;
     private _binaryFieldParsers: BinaryFieldParser[] | null = null;
     private _rows: unknown[] = [];
     private _tupdesc: DbosTupleDesc = new DbosTupleDesc();
+    private _batchRowCache: unknown[][] | null = null;
     private _tmpBuffer: Buffer = Buffer.alloc(65536);
 
     // Internal buffer pool for better performance with large result sets
@@ -636,11 +639,21 @@ class NzConnection extends EventEmitter {
         this._rows = [];
         this._rowDescription = null;
         this._textColumnParsers = null;
+        this._textBufferParsers = null;
         this._binaryFieldParsers = null;
+        this._batchRowCache = null;
+        this._tupdesc.clear();
 
         let completed = false;
 
         while (!completed) {
+            // Drain batch cache first
+            if (this._batchRowCache && this._batchRowCache.length > 0) {
+                const cached = this._batchRowCache.shift()!;
+                yield { type: 'DataRow', row: cached };
+                continue;
+            }
+
             let type = await this._readByte();
 
             while (type === 0) {
@@ -762,6 +775,10 @@ class NzConnection extends EventEmitter {
             if (type === BackendMessageCode.RowStandard) {
                 const row = await this._resReadDbosTuple(command);
                 yield { type: 'DataRow', row };
+                // Try batch-read more rows from internal buffer (optimization)
+                if (!this._batchRowCache) {
+                    this._batchRowCache = this._tryReadDbosBatch();
+                }
                 continue;
             }
 
@@ -1082,6 +1099,10 @@ class NzConnection extends EventEmitter {
             TypeConversions.createTextValueParser(column.typeOid, column.typeMod)
         );
 
+        this._textBufferParsers = this._rowDescription.map((column) =>
+            TypeConversions.createTextBufferParser(column.typeOid, column.typeMod)
+        );
+
         if (command) command._preparedStatement = { description: this._rowDescription };
     }
 
@@ -1110,13 +1131,18 @@ class NzConnection extends EventEmitter {
                 continue;
             }
 
-            const colDesc = this._rowDescription![columnNumber];
-            const value = data.toString('utf8', dataIdx, dataIdx + actualLen);
-            const parser = this._textColumnParsers?.[columnNumber];
-
-            row[columnNumber] = parser
-                ? parser(value)
-                : TypeConversions.parseTextValue(value, colDesc?.typeOid, colDesc?.typeMod ?? -1);
+            // Fast path: parse directly from Buffer for known types
+            const bufParser = this._textBufferParsers?.[columnNumber];
+            if (bufParser) {
+                row[columnNumber] = bufParser(data, dataIdx, actualLen);
+            } else {
+                const colDesc = this._rowDescription![columnNumber];
+                const value = data.toString('utf8', dataIdx, dataIdx + actualLen);
+                const parser = this._textColumnParsers?.[columnNumber];
+                row[columnNumber] = parser
+                    ? parser(value)
+                    : TypeConversions.parseTextValue(value, colDesc?.typeOid, colDesc?.typeMod ?? -1);
+            }
             dataIdx += actualLen;
         }
         return row;
@@ -1127,8 +1153,28 @@ class NzConnection extends EventEmitter {
         await this._readBytes(4);
         const rowLength = PGUtil.readInt32(await this._readBytes(4));
         const data = await this._readBytes(rowLength);
+        return this._parseDbosRow(data);
+    }
+
+    private _parseDbosRow(data: Buffer): unknown[] {
+        const numFields = this._tupdesc.numFields;
         const parsers = this._binaryFieldParsers;
         const row = new Array(numFields);
+
+        // Pre-compute variable field offsets once per row (O(n) instead of O(n²))
+        const numVaryingFields = this._tupdesc.numVaryingFields ?? 0;
+        let varOffsets: number[] | null = null;
+        const fixedFieldsSize = this._tupdesc.fixedFieldsSize;
+        if (numVaryingFields > 0) {
+            varOffsets = new Array(numVaryingFields);
+            let voff = fixedFieldsSize;
+            for (let j = 0; j < numVaryingFields; j++) {
+                varOffsets[j] = voff;
+                const vlen = data.readUInt16LE(voff);
+                voff += vlen;
+                if (vlen % 2 !== 0) voff += 1; // 2-byte alignment
+            }
+        }
 
         for (let i = 0; i < numFields; i++) {
             if (this._columnIsNull(data, i)) {
@@ -1136,20 +1182,77 @@ class NzConnection extends EventEmitter {
                 continue;
             }
 
-            const fieldData = this._cTableFieldAt(data, i);
-            const parser = parsers?.[i];
-
-            if (parser) {
-                row[i] = parser(fieldData);
-                continue;
+            let fieldData: Buffer;
+            const fixedSize = this._tupdesc.fieldFixedSize[i];
+            if (fixedSize !== 0) {
+                fieldData = data.subarray(this._tupdesc.fieldOffset[i]);
+            } else if (varOffsets) {
+                const voff = varOffsets[this._tupdesc.fieldOffset[i]];
+                fieldData = data.subarray(voff);
+            } else {
+                fieldData = this._cTableFieldAt(data, i);
             }
 
-            const fldType = this._tupdesc.fieldType[i];
-            const fldLen = this._tupdesc.fieldSize[i];
-            row[i] = this._parseFieldByType(fieldData, fldType, fldLen, i);
+            const parser = parsers?.[i];
+            if (parser) {
+                row[i] = parser(fieldData);
+            } else {
+                const fldType = this._tupdesc.fieldType[i];
+                const fldLen = this._tupdesc.fieldSize[i];
+                row[i] = this._parseFieldByType(fieldData, fldType, fldLen, i);
+            }
         }
 
         return row;
+    }
+
+    /**
+     * Try to read additional DBOS rows from the internal buffer.
+     * Called after the first row is read, to batch-process remaining rows
+     * without per-row async overhead.
+     * Validates rowLen against msgLen to detect data corruption.
+     */
+    private _tryReadDbosBatch(): unknown[][] {
+        const rows: unknown[][] = [];
+
+        while (true) {
+            const available = this._intBufEnd - this._intBufStart;
+            if (available < 1) break;
+
+            // Next byte should be 'Y' (RowStandard)
+            if (this._intBuf[this._intBufStart] !== 89) break;
+
+            // We need: type(1) + msgLen(4) to compute total message size
+            if (available < 5) break;
+            const msgLen = this._intBuf.readInt32BE(this._intBufStart + 1);
+            const totalMsg = 1 + 4 + msgLen; // type + length_field + payload
+            if (available < totalMsg) break;
+
+            // msgLen must include at least [4 skip + 4 rowLen]
+            if (msgLen < 8) break;
+
+            // Compute where payload starts (after type + length field)
+            const payloadStart = this._intBufStart + 5;
+            const payloadEnd = payloadStart + msgLen;
+            if (payloadEnd > this._intBufEnd) break;
+
+            // Read rowLen from bytes 4..7 of payload
+            const rowLen = this._intBuf.readInt32BE(payloadStart + 4);
+
+            // Validate rowLen: 8 + rowLen must equal msgLen
+            if (rowLen <= 0 || (8 + rowLen) !== msgLen) break;
+
+            // Row data is bytes 8..(8+rowLen) of payload
+            const dataStart = payloadStart + 8;
+            const data = this._intBuf.subarray(dataStart, dataStart + rowLen);
+
+            // Advance past this complete message
+            this._intBufStart = payloadEnd;
+
+            rows.push(this._parseDbosRow(data));
+        }
+
+        return rows;
     }
 
     private _buildBinaryFieldParsers(): BinaryFieldParser[] {
