@@ -58,6 +58,13 @@ export interface NzConnectionConfig {
     password: string;
     securityLevel?: string;
     sslCerFilePath?: string;
+    /**
+     * When true (default), the TLS layer verifies the server certificate against
+     * the system CA store (or against `sslCerFilePath` if provided).
+     *
+     * Set to `false` to allow self-signed or otherwise untrusted certificates.
+     * Use this option only for testing or when you trust the network and server.
+     */
     rejectUnauthorized?: boolean;
     connectionTimeout?: number; // Connection timeout in seconds (default: 30)
     /** Application name reported to Netezza for Guardium audit / system table visibility */
@@ -98,6 +105,8 @@ class NzConnection extends EventEmitter {
     private _backendProcessId: number = 0;
     private _backendSecretKey: number = 0;
     private _commandNumber: number = 0;
+    /** Incremented on every command execution. Used to detect stale timeout-cancel calls. */
+    private _commandGeneration: number = 0;
     private _connected: boolean = false;
     private _rowDescription: ColumnInfo[] | null = null;
     private _textColumnParsers: TextValueParser[] | null = null;
@@ -252,8 +261,13 @@ class NzConnection extends EventEmitter {
         });
     }
 
-    async cancel(): Promise<void> {
+    async cancel(internalGen?: number): Promise<void> {
         if (!this._backendProcessId || !this._backendSecretKey) return;
+        // If a newer command already started, this cancel is stale — abort.
+        if (internalGen !== undefined && internalGen !== this._commandGeneration) {
+            debug('Stale cancel detected — generation mismatch, skipping');
+            return;
+        }
 
         const timeoutSeconds = this.connectionTimeout || 10;
         return new Promise((resolve, reject) => {
@@ -282,6 +296,16 @@ class NzConnection extends EventEmitter {
             });
             socket.connect(this.config.port || 5480, this.config.host, () => {
                 cleanup();
+
+                // Check again right before sending — the command may have finished since connect started.
+                if (internalGen !== undefined && internalGen !== this._commandGeneration) {
+                    debug('Stale cancel after connect — generation mismatch, discarding socket');
+                    socket.end();
+                    socket.destroy();
+                    resolve();
+                    return;
+                }
+
                 const buf = Buffer.alloc(16);
                 PGUtil.writeInt32(buf, 16, 0);
                 PGUtil.writeInt32(buf, 80877102, 4);
@@ -474,6 +498,7 @@ class NzConnection extends EventEmitter {
             return this._doExecute(command);
         }
 
+        const execGen = this._commandGeneration + 1;
         let timer: NodeJS.Timeout | undefined;
         const execPromise = this._doExecute(command);
 
@@ -481,7 +506,7 @@ class NzConnection extends EventEmitter {
             timer = setTimeout(async () => {
                 debug('Command timeout triggered');
                 try {
-                    await this.cancel();
+                    await this.cancel(execGen);
                 } catch (e: unknown) {
                     debug('Cancel failed during timeout:', (e as Error).message);
                 }
@@ -506,6 +531,7 @@ class NzConnection extends EventEmitter {
             throw new Error('Connection is already executing a command');
         }
         this._executing = true;
+        this._commandGeneration++;
         try {
             debug('Executing:', command.commandText);
             this._preExecution(command);
@@ -533,6 +559,7 @@ class NzConnection extends EventEmitter {
             return this._doExecuteReader(command);
         }
 
+        const execGen = this._commandGeneration + 1;
         let timer: NodeJS.Timeout | undefined;
         const execPromise = this._doExecuteReader(command);
 
@@ -540,7 +567,7 @@ class NzConnection extends EventEmitter {
             timer = setTimeout(async () => {
                 debug('Command timeout triggered');
                 try {
-                    await this.cancel();
+                    await this.cancel(execGen);
                     reject(new Error('Command execution timeout'));
                 } catch (e: unknown) {
                     reject(new Error('Command execution timeout (Cancel failed: ' + (e as Error).message + ')'));
@@ -565,6 +592,7 @@ class NzConnection extends EventEmitter {
             throw new Error('Connection is already executing a command');
         }
         this._executing = true;
+        this._commandGeneration++;
 
         try {
             debug('Executing Reader:', command.commandText);

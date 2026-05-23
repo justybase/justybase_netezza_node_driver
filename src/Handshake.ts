@@ -192,16 +192,11 @@ class Handshake {
 
             const sslOptions: tls.ConnectionOptions = {
                 socket: this._socket,
-                rejectUnauthorized: false,
+                // Secure by default: verify server certificate unless user explicitly opts out
+                rejectUnauthorized: this._options.rejectUnauthorized !== false,
             };
 
             if (this._options.sslCerFilePath) {
-                if (this._options.rejectUnauthorized === false) {
-                    sslOptions.rejectUnauthorized = false;
-                } else {
-                    sslOptions.rejectUnauthorized = true;
-                }
-
                 try {
                     sslOptions.ca = fs.readFileSync(this._options.sslCerFilePath);
                 } catch (err) {
