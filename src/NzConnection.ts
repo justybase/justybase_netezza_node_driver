@@ -255,13 +255,33 @@ class NzConnection extends EventEmitter {
     async cancel(): Promise<void> {
         if (!this._backendProcessId || !this._backendSecretKey) return;
 
+        const timeoutSeconds = this.connectionTimeout || 10;
         return new Promise((resolve, reject) => {
             const socket = new net.Socket();
+
+            const timer = setTimeout(() => {
+                debug('Cancel socket timeout after', timeoutSeconds, 'seconds');
+                socket.destroy();
+                reject(new Error(`Cancel connection timeout after ${timeoutSeconds} seconds`));
+            }, timeoutSeconds * 1000);
+
+            const cleanup = () => {
+                clearTimeout(timer);
+                socket.removeAllListeners();
+            };
+
             socket.on('error', (err) => {
+                cleanup();
                 debug('Cancel socket error', err);
                 reject(err);
             });
+            socket.setTimeout(timeoutSeconds * 1000, () => {
+                cleanup();
+                socket.destroy();
+                reject(new Error(`Cancel connection timeout after ${timeoutSeconds} seconds`));
+            });
             socket.connect(this.config.port || 5480, this.config.host, () => {
+                cleanup();
                 const buf = Buffer.alloc(16);
                 PGUtil.writeInt32(buf, 16, 0);
                 PGUtil.writeInt32(buf, 80877102, 4);
@@ -283,9 +303,10 @@ class NzConnection extends EventEmitter {
         }
     }
 
-    createCommand(sql?: string): NzCommand {
+    createCommand(sql?: string, params?: unknown[]): NzCommand {
         const cmd = new NzCommand(this);
         if (sql) cmd.commandText = sql;
+        if (params) cmd.parameters = params;
         return cmd;
     }
 
@@ -487,7 +508,7 @@ class NzConnection extends EventEmitter {
         this._executing = true;
         try {
             debug('Executing:', command.commandText);
-            this._preExecution(command.commandText);
+            this._preExecution(command);
 
             let error: Error | null = null;
             const notices: string[] = [];
@@ -547,7 +568,7 @@ class NzConnection extends EventEmitter {
 
         try {
             debug('Executing Reader:', command.commandText);
-            this._preExecution(command.commandText);
+            this._preExecution(command);
 
             const generator = this._responseGenerator(command);
             let columns: ColumnInfo[] = [];
@@ -611,7 +632,40 @@ class NzConnection extends EventEmitter {
         }
     }
 
-    private _preExecution(query: string): void {
+    private _escapeLiteral(value: unknown): string {
+        if (value === null || value === undefined) return 'NULL';
+        if (typeof value === 'boolean') return value ? "'t'" : "'f'";
+        if (typeof value === 'number' || typeof value === 'bigint') return String(value);
+        if (typeof value === 'string') {
+            const escaped = value.replace(/'/g, "''");
+            return `'${escaped}'`;
+        }
+        if (value instanceof Date) return `'${value.toISOString().replace('T', ' ').replace(/\.\d{3}Z$/, '')}'`;
+        if (Buffer.isBuffer(value)) {
+            const hex = value.toString('hex');
+            return `E'\\\\x${hex}'`;
+        }
+        if (typeof (value as { toString: () => string }).toString === 'function') {
+            const str = (value as { toString: () => string }).toString();
+            const escaped = str.replace(/'/g, "''");
+            return `'${escaped}'`;
+        }
+        return `'${String(value)}'`;
+    }
+
+    private _substituteParameters(sql: string, params: unknown[]): string {
+        if (!params || params.length === 0) return sql;
+        return sql.replace(/\$(\d+)/g, (_match, indexStr: string) => {
+            const idx = parseInt(indexStr, 10) - 1;
+            if (idx < 0 || idx >= params.length) return _match;
+            return this._escapeLiteral(params[idx]);
+        });
+    }
+
+    private _preExecution(command: NzCommand): void {
+        const query = command.parameters && command.parameters.length > 0
+            ? this._substituteParameters(command.commandText, command.parameters)
+            : command.commandText;
         const queryBytes = Buffer.from(query, 'utf8');
         const buf = Buffer.allocUnsafe(1 + 4 + queryBytes.length + 1);
         buf[0] = 'P'.charCodeAt(0);
