@@ -108,44 +108,46 @@ class NzConnection extends EventEmitter {
     private _batchRowCache: unknown[][] | null = null;
     private _tmpBuffer: Buffer = Buffer.alloc(65536);
 
-    // Internal buffer pool for better performance with large result sets
-    // Using pool reduces GC pressure from frequent Buffer allocations
-    private static readonly BUFFER_SIZE = 1024 * 1024; // 1 MB
-    private static readonly POOL_SIZE = 4; // 4 buffers = 4 MB per connection
-    private _bufferPool: Buffer[] = [];
-    private _bufferPoolIndex: number = 0;
+    // Single dynamic internal buffer for reading from the stream.
+    // Grows as needed by reallocation instead of using a fixed-size circular pool,
+    // which avoids data corruption when consumption lags behind arrival.
     private _intBuf!: Buffer;
     private _intBufStart: number = 0;
     private _intBufEnd: number = 0;
 
-    private _initializeBufferPool(): void {
-        // Pre-allocate buffers to avoid runtime allocations
-        for (let i = 0; i < NzConnection.POOL_SIZE; i++) {
-            this._bufferPool.push(Buffer.allocUnsafe(NzConnection.BUFFER_SIZE));
-        }
-        this._intBuf = this._bufferPool[0];
+    private _initBuffer(): void {
+        this._intBuf = Buffer.allocUnsafe(65536);
     }
 
     /**
-     * Rotates to the next buffer in the pool to avoid expensive copy operations.
-     * When current buffer has remaining data, it's copied to the new buffer.
-     * This is more efficient than frequent small memcpy operations.
+     * Ensures the internal buffer has at least `needed` bytes of writable space.
+     * Compacts remaining unconsumed data to the front, or grows the buffer if necessary.
      */
-    private _rotateBuffer(): void {
+    private _ensureBufferCapacity(needed: number): void {
         const remaining = this._intBufEnd - this._intBufStart;
-        this._bufferPoolIndex = (this._bufferPoolIndex + 1) % NzConnection.POOL_SIZE;
-        const newBuf = this._bufferPool[this._bufferPoolIndex];
 
-        if (remaining > 0) {
-            // Copy remaining data to the new buffer at offset 0
-            this._intBuf.copy(newBuf, 0, this._intBufStart, this._intBufEnd);
+        // Already enough space from current write position
+        if (this._intBuf.length - this._intBufEnd >= needed) return;
+
+        // Enough total capacity if we compact to front
+        if (this._intBuf.length - remaining >= needed) {
+            if (remaining > 0) {
+                this._intBuf.copy(this._intBuf, 0, this._intBufStart, this._intBufEnd);
+            }
             this._intBufStart = 0;
             this._intBufEnd = remaining;
-        } else {
-            this._intBufStart = 0;
-            this._intBufEnd = 0;
+            return;
+        }
+
+        // Need to grow: allocate new buffer, preserving remaining data
+        const newSize = Math.max(this._intBuf.length * 2, remaining + needed, 65536);
+        const newBuf = Buffer.allocUnsafe(newSize);
+        if (remaining > 0) {
+            this._intBuf.copy(newBuf, 0, this._intBufStart, this._intBufEnd);
         }
         this._intBuf = newBuf;
+        this._intBufStart = 0;
+        this._intBufEnd = remaining;
     }
 
     commandTimeout: number = 30;
@@ -167,9 +169,7 @@ class NzConnection extends EventEmitter {
     constructor(config: NzConnectionConfig) {
         super();
         this.config = config;
-        // Initialize buffer pool for better I/O performance
-        this._initializeBufferPool();
-        // Apply connection timeout from config
+        this._initBuffer();
         if (config.connectionTimeout !== undefined) {
             this.connectionTimeout = config.connectionTimeout;
         }
@@ -277,7 +277,6 @@ class NzConnection extends EventEmitter {
     }
 
     close(): void {
-        this._bufferPool = [];
         if (this._socket) {
             this._socket.end();
             this._socket.destroy();
@@ -344,9 +343,7 @@ class NzConnection extends EventEmitter {
         }
 
         if (this._intBuf.length - this._intBufStart < n) {
-            // Use buffer rotation instead of copying data to front
-            // This is more efficient as it avoids frequent memcpy operations
-            this._rotateBuffer();
+            this._ensureBufferCapacity(this._intBufStart + n);
         }
 
         while (this._intBufEnd - this._intBufStart < n) {
@@ -429,9 +426,7 @@ class NzConnection extends EventEmitter {
         if (this._intBufEnd - this._intBufStart >= n) return;
 
         if (this._intBuf.length - this._intBufStart < n) {
-            // Use buffer rotation instead of copying data to front
-            // This is more efficient as it avoids frequent memcpy operations
-            this._rotateBuffer();
+            this._ensureBufferCapacity(this._intBufStart + n);
         }
 
         while (this._intBufEnd - this._intBufStart < n) {
