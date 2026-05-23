@@ -27,7 +27,7 @@
     "test": "jest --runInBand --config jest.config.js --testPathPatterns=\\.smoke\\.",
     "test:smoke": "jest --runInBand --config jest.config.js --testPathPatterns=\\.smoke\\.",
     "test:full": "jest --runInBand --config jest.config.js",
-    "test:debug": "set DEBUG=nz:* & jest --runInBand --config jest.config.js",
+    "test:debug": "cross-env DEBUG=nz:* jest --runInBand --config jest.config.js",
     "prepublishOnly": "npm run clean && npm run build"
   },
   "repository": {
@@ -59,6 +59,7 @@
     "@eslint/js": "^10.0.1",
     "@types/debug": "^4.1.13",
     "@types/node": "^25.8.0",
+    "cross-env": "^10.1.0",
     "eslint": "^10.4.0",
     "jest": "^30.4.2",
     "mitata": "^1.0.34",

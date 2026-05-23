@@ -3,17 +3,10 @@
  * Port of C# NzConnectionHelpers.cs
  */
 
+import type { TimeValue } from '../types/TypeConversions';
+
 export const CLIENT_ENCODING = 'utf8';
 export const CHAR_VARCHAR_ENCODING = 'latin1';
-
-/** Time value structure */
-export interface TimeValue {
-    hours: number;
-    minutes: number;
-    seconds: number;
-    microseconds: number;
-    toString(): string;
-}
 
 /**
  * Parse text from buffer

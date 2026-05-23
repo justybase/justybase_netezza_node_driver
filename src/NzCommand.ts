@@ -65,6 +65,31 @@ class NzCommand {
     async cancel(): Promise<void> {
         return this.connection.cancel();
     }
+
+    /**
+     * Set parameters for parameterized queries.
+     * Parameters are referenced as $1, $2, ... in the command text.
+     * Values are automatically escaped to prevent SQL injection.
+     *
+     * @example
+     * ```typescript
+     * const cmd = connection.createCommand('SELECT * FROM users WHERE id = $1 AND active = $2');
+     * cmd.setParameters(42, true);
+     * const reader = await cmd.executeReader();
+     * ```
+     */
+    setParameters(...params: unknown[]): this {
+        this.parameters = params;
+        return this;
+    }
+
+    /**
+     * Add a single parameter value.
+     */
+    addParameter(value: unknown): this {
+        this.parameters.push(value);
+        return this;
+    }
 }
 
 export { NzCommand };

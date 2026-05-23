@@ -1,4 +1,5 @@
 import type { NzCommand } from './NzCommand';
+import type { TimeValue } from './types/TypeConversions';
 
 /**
  * Column description from the database
@@ -51,17 +52,6 @@ interface GeneratorItem {
     columns?: ColumnDescription[];
     desc?: { fieldNullAllowed: boolean[] };
     message?: string;
-}
-
-/**
- * Time value structure
- */
-interface TimeValue {
-    hours: number;
-    minutes: number;
-    seconds: number;
-    microseconds: number;
-    toString(): string;
 }
 
 // Postgres/Netezza OIDs
