@@ -97,7 +97,7 @@ class NzConnection extends EventEmitter {
     private _stream: Stream | null = null;
     private _backendProcessId: number = 0;
     private _backendSecretKey: number = 0;
-    private _commandNumber: number = -1;
+    private _commandNumber: number = 0;
     private _connected: boolean = false;
     private _rowDescription: ColumnInfo[] | null = null;
     private _textColumnParsers: TextValueParser[] | null = null;
@@ -615,16 +615,9 @@ class NzConnection extends EventEmitter {
         const queryBytes = Buffer.from(query, 'utf8');
         const buf = Buffer.allocUnsafe(1 + 4 + queryBytes.length + 1);
         buf[0] = 'P'.charCodeAt(0);
-        if (this._commandNumber !== -1) {
-            this._commandNumber++;
-            buf.writeInt32BE(this._commandNumber, 1);
-        } else {
-            buf[1] = 0xff;
-            buf[2] = 0xff;
-            buf[3] = 0xff;
-            buf[4] = 0xff;
-        }
+        this._commandNumber++;
         if (this._commandNumber > 100000) this._commandNumber = 1;
+        buf.writeInt32BE(this._commandNumber, 1);
         queryBytes.copy(buf, 5);
         buf[5 + queryBytes.length] = 0;
         this._stream!.write(buf);
