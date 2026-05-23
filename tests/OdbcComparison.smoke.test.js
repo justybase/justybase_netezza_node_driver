@@ -20,17 +20,40 @@ const connectionString = `DRIVER={NetezzaSQL};SERVER=${config.host};PORT=${confi
 const isLinux = process.platform === 'linux';
 
 function repairOdbcWideChars(s) {
-    let r = '';
-    for (let i = 0; i < s.length; i++) {
-        const c = s.charCodeAt(i);
-        if (c > 255) {
-            r += String.fromCharCode(c & 0xFF);
-            r += String.fromCharCode((c >> 8) & 0xFF);
-        } else {
-            r += s[i];
+    const hasWide = [...s].some(ch => ch.charCodeAt(0) > 255);
+    if (hasWide) {
+        for (let i = 0; i < s.length - 1; i++) {
+            if (s.charCodeAt(i) <= 255 && s.charCodeAt(i + 1) > 255) {
+                s = s.substring(0, i + 1);
+                break;
+            }
         }
+        let changed;
+        do {
+            changed = false;
+            let trail = 0;
+            for (let i = s.length - 1; i >= 0 && s.charCodeAt(i) <= 255; i--) trail++;
+            if (trail >= 2) {
+                s = s.substring(0, s.length - 1);
+                changed = true;
+            }
+        } while (changed);
+
+        let r = '';
+        for (let i = 0; i < s.length; i++) {
+            const c = s.charCodeAt(i);
+            if (c > 255) {
+                r += String.fromCharCode(c & 0xFF);
+                r += String.fromCharCode((c >> 8) & 0xFF);
+            } else {
+                r += s[i];
+            }
+        }
+        const nullIdx = r.indexOf(String.fromCharCode(0));
+        if (nullIdx !== -1) r = r.substring(0, nullIdx);
+        return Buffer.from(r, 'latin1').toString('utf8');
     }
-    return r;
+    return s;
 }
 
 // Essential queries covering all major data types (reduced from 190+ to 15)
