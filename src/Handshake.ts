@@ -78,11 +78,18 @@ class Handshake {
     }
 
     async readBytes(n: number): Promise<Buffer> {
-        while (true) {
-            const chunk = this._stream.read(n) as Buffer | null;
-            if (chunk !== null) return chunk;
-            await new Promise<void>((r) => this._stream.once('readable', r));
+        const chunks: Buffer[] = [];
+        let needed = n;
+        while (needed > 0) {
+            const chunk = this._stream.read(needed) as Buffer | null;
+            if (chunk !== null) {
+                chunks.push(chunk);
+                needed -= chunk.length;
+            } else {
+                await new Promise<void>((r) => this._stream.once('readable', r));
+            }
         }
+        return chunks.length === 1 ? chunks[0] : Buffer.concat(chunks, n);
     }
 
     async readByte(): Promise<number> {
