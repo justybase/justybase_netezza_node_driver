@@ -145,8 +145,19 @@ describe('TypeConversions - text parser factory', () => {
 describe('TypeConversions - numeric binary parity', () => {
     test.each([
         { value: '0', prec: 9, scale: 0, digitCount: 1, expected: 0 },
+        // Fast path: partCount=1, prec<=15, positive/negative
+        { value: '999999999', prec: 9, scale: 0, digitCount: 1, expected: 999999999 },
+        { value: '-999999999', prec: 9, scale: 0, digitCount: 1, expected: -999999999 },
+        // Fast path: partCount=2, prec<=15, positive/negative
         { value: '12345.6789', prec: 10, scale: 4, digitCount: 2, expected: 12345.6789 },
+        { value: '-543.21', prec: 10, scale: 2, digitCount: 2, expected: -543.21 },
         { value: '3.1400', prec: 10, scale: 4, digitCount: 2, expected: '3.1400' },
+        // Boundary: prec=15 (edge of fast path), partCount=2
+        { value: '99999.999999', prec: 15, scale: 6, digitCount: 2, expected: 99999.999999 },
+        { value: '-99999.999999', prec: 15, scale: 6, digitCount: 2, expected: -99999.999999 },
+        // BigInt path: prec=16 > 15 but still partCount=2
+        { value: '1234567890123456', prec: 16, scale: 0, digitCount: 2, expected: 1234567890123456 },
+        // High precision (BigInt path, partCount=4)
         { value: '123456789012345678.87654321', prec: 26, scale: 8, digitCount: 4, expected: '123456789012345678.87654321' },
         { value: '923281625142643375987.43950777', prec: 38, scale: 8, digitCount: 4, expected: '923281625142643375987.43950777' },
         { value: '-923281625142643375987.43950777', prec: 38, scale: 8, digitCount: 4, expected: '-923281625142643375987.43950777' },

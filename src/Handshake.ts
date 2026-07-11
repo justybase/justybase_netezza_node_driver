@@ -311,7 +311,6 @@ class Handshake {
                     len = 4 + 2;
                     PGUtil.writeInt32(this._stream, len);
                     PGUtil.writeInt16(this._stream, information);
-                    information = 0;
                     return true;
             }
         }
@@ -375,7 +374,6 @@ class Handshake {
                         len = 4 + 2;
                         PGUtil.writeInt32(this._stream, len);
                         PGUtil.writeInt16(this._stream, information);
-                        information = 0;
                         return true;
                 }
             } else if (beresp === BackendMessageCode.ErrorResponse) {

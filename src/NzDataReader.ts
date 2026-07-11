@@ -298,10 +298,10 @@ class NzDataReader {
         const declaredLength = this._getCharacterDeclaredLength(col);
         const numeric = this._getNumericPrecisionScale(col.typeMod);
 
-        let columnSize = col.typeLen > 0 ? col.typeLen : -1;
+        let columnSize: number;
         let numericPrecision = 0;
         let numericScale = 0;
-        let dataType: (...args: unknown[]) => unknown = String;
+        let dataType: (...args: unknown[]) => unknown;
 
         switch (oid) {
             case Oid.Bool:

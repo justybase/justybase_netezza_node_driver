@@ -96,7 +96,7 @@ type ResponseMessage =
 
 type TextValueParser = (value: string) => unknown;
 type TextBufferParser = (data: Buffer, offset: number, len: number) => unknown;
-type BinaryFieldParser = (fieldData: Buffer) => unknown;
+type BinaryFieldParser = (buffer: Buffer, fieldStart: number) => unknown;
 
 class NzConnection extends EventEmitter {
     config: NzConnectionConfig;
@@ -116,6 +116,35 @@ class NzConnection extends EventEmitter {
     private _tupdesc: DbosTupleDesc = new DbosTupleDesc();
     private _batchRowCache: unknown[][] | null = null;
     private _tmpBuffer: Buffer = Buffer.alloc(65536);
+    private _varOffsetsScratch: number[] = [];
+
+    // Diagnostics counters
+    _diag: Record<string, number> = {};
+    private _resetDiag(): void {
+        this._diag = {
+            readBytesCalls: 0,
+            readBytesBytes: 0,
+            readBytesSlowCalls: 0,
+            readBytesSlowBytes: 0,
+            ensureBufferCompactions: 0,
+            ensureBufferRegrows: 0,
+            resReadDbosTupleCalls: 0,
+            parseDbosRowCalls: 0,
+            parseDbosRowVarOffsetsAlloc: 0,
+            generatorYields: 0,
+            generatorYieldsDataRow: 0,
+            generatorYieldsRowDesc: 0,
+            generatorYieldsCmdComplete: 0,
+            tryReadDbosBatchCalls: 0,
+            tryReadDbosBatchRows: 0,
+            tryReadDbosBatchPeeks: 0,
+            batchCacheHits: 0,
+            getValueCalls: 0,
+            textParseDataRowCalls: 0,
+            textParseSlowPath: 0,
+            textParseFastPath: 0,
+        };
+    }
 
     // Single dynamic internal buffer for reading from the stream.
     // Grows as needed by reallocation instead of using a fixed-size circular pool,
@@ -143,6 +172,7 @@ class NzConnection extends EventEmitter {
             if (remaining > 0) {
                 this._intBuf.copy(this._intBuf, 0, this._intBufStart, this._intBufEnd);
             }
+            this._diag.ensureBufferCompactions = (this._diag.ensureBufferCompactions || 0) + 1;
             this._intBufStart = 0;
             this._intBufEnd = remaining;
             return;
@@ -154,6 +184,7 @@ class NzConnection extends EventEmitter {
         if (remaining > 0) {
             this._intBuf.copy(newBuf, 0, this._intBufStart, this._intBufEnd);
         }
+        this._diag.ensureBufferRegrows = (this._diag.ensureBufferRegrows || 0) + 1;
         this._intBuf = newBuf;
         this._intBufStart = 0;
         this._intBufEnd = remaining;
@@ -349,7 +380,14 @@ class NzConnection extends EventEmitter {
         await this.execute(cmd);
     }
 
+    private async _skipBytes(n: number): Promise<void> {
+        await this._ensureBufferData(n);
+        this._intBufStart += n;
+    }
+
     private async _readBytes(n: number): Promise<Buffer> {
+        this._diag.readBytesCalls = (this._diag.readBytesCalls || 0) + 1;
+        this._diag.readBytesBytes = (this._diag.readBytesBytes || 0) + n;
         if (this._intBufEnd - this._intBufStart >= n) {
             const result = Buffer.from(this._intBuf.subarray(this._intBufStart, this._intBufStart + n));
             this._intBufStart += n;
@@ -359,6 +397,8 @@ class NzConnection extends EventEmitter {
     }
 
     private async _readBytesSlow(n: number): Promise<Buffer> {
+        this._diag.readBytesSlowCalls = (this._diag.readBytesSlowCalls || 0) + 1;
+        this._diag.readBytesSlowBytes = (this._diag.readBytesSlowBytes || 0) + n;
         if (n > this._intBuf.length) {
             const chunks: Buffer[] = [];
             const available = this._intBufEnd - this._intBufStart;
@@ -593,6 +633,7 @@ class NzConnection extends EventEmitter {
         }
         this._executing = true;
         this._commandGeneration++;
+        this._resetDiag();
 
         try {
             debug('Executing Reader:', command.commandText);
@@ -720,6 +761,9 @@ class NzConnection extends EventEmitter {
             // Drain batch cache first
             if (this._batchRowCache && this._batchRowCache.length > 0) {
                 const cached = this._batchRowCache.shift()!;
+                this._diag.batchCacheHits = (this._diag.batchCacheHits || 0) + 1;
+                this._diag.generatorYields = (this._diag.generatorYields || 0) + 1;
+                this._diag.generatorYieldsDataRow = (this._diag.generatorYieldsDataRow || 0) + 1;
                 yield { type: 'DataRow', row: cached };
                 continue;
             }
@@ -746,7 +790,7 @@ class NzConnection extends EventEmitter {
             }
 
             if (type === 'x'.charCodeAt(0)) {
-                await this._readBytes(4);
+                await this._skipBytes(4);
                 debug('Error operation cancel (Ext Tbl)');
                 continue;
             }
@@ -775,23 +819,24 @@ class NzConnection extends EventEmitter {
                 continue;
             }
 
-            await this._readBytes(4);
+            await this._skipBytes(4);
 
             if (type === BackendMessageCode.CommandComplete) {
                 const len = await this._readInt32();
                 const data = await this._readBytes(len);
                 const commandText = data.toString('utf8');
                 debug('CommandComplete:', commandText);
-                // Parse rows affected from CommandComplete message
-                // Netezza returns patterns like: "INSERT 0 1", "UPDATE 5", "DELETE 3", "CREATE TABLE"
                 const rowsAffected = parseCommandCompleteRows(commandText);
                 command._recordsAffected = rowsAffected;
+                this._diag.generatorYields = (this._diag.generatorYields || 0) + 1;
+                this._diag.generatorYieldsCmdComplete = (this._diag.generatorYieldsCmdComplete || 0) + 1;
                 yield { type: 'CommandComplete', text: commandText, rowsAffected };
                 continue;
             }
 
             if (type === BackendMessageCode.ReadyForQuery) {
                 completed = true;
+                this._diag.generatorYields = (this._diag.generatorYields || 0) + 1;
                 yield { type: 'ReadyForQuery' };
                 continue;
             }
@@ -821,14 +866,19 @@ class NzConnection extends EventEmitter {
                 const len = await this._readInt32();
                 const data = await this._readBytes(len);
                 this._parseRowDescription(data, command);
+                this._diag.generatorYields = (this._diag.generatorYields || 0) + 1;
+                this._diag.generatorYieldsRowDesc = (this._diag.generatorYieldsRowDesc || 0) + 1;
                 yield { type: 'RowDescription', columns: this._rowDescription! };
                 continue;
             }
 
             if (type === BackendMessageCode.DataRow) {
+                this._diag.textParseDataRowCalls = (this._diag.textParseDataRowCalls || 0) + 1;
                 const len = await this._readInt32();
                 const data = await this._readBytes(len);
                 const row = this._parseDataRow(data);
+                this._diag.generatorYields = (this._diag.generatorYields || 0) + 1;
+                this._diag.generatorYieldsDataRow = (this._diag.generatorYieldsDataRow || 0) + 1;
                 yield { type: 'DataRow', row };
                 continue;
             }
@@ -844,11 +894,13 @@ class NzConnection extends EventEmitter {
 
             if (type === BackendMessageCode.RowStandard) {
                 const row = await this._resReadDbosTuple(command);
-                yield { type: 'DataRow', row };
-                // Try batch-read more rows from internal buffer (optimization)
+                // Try batch-read more rows from internal buffer while data is hot
                 if (!this._batchRowCache) {
                     this._batchRowCache = this._tryReadDbosBatch();
                 }
+                this._diag.generatorYields = (this._diag.generatorYields || 0) + 1;
+                this._diag.generatorYieldsDataRow = (this._diag.generatorYieldsDataRow || 0) + 1;
+                yield { type: 'DataRow', row };
                 continue;
             }
 
@@ -1204,8 +1256,10 @@ class NzConnection extends EventEmitter {
             // Fast path: parse directly from Buffer for known types
             const bufParser = this._textBufferParsers?.[columnNumber];
             if (bufParser) {
+                this._diag.textParseFastPath = (this._diag.textParseFastPath || 0) + 1;
                 row[columnNumber] = bufParser(data, dataIdx, actualLen);
             } else {
+                this._diag.textParseSlowPath = (this._diag.textParseSlowPath || 0) + 1;
                 const colDesc = this._rowDescription![columnNumber];
                 const value = data.toString('utf8', dataIdx, dataIdx + actualLen);
                 const parser = this._textColumnParsers?.[columnNumber];
@@ -1219,61 +1273,80 @@ class NzConnection extends EventEmitter {
     }
 
     private async _resReadDbosTuple(_command: NzCommand): Promise<unknown[]> {
-        const numFields = this._tupdesc.numFields;
-        await this._readBytes(4);
-        const rowLength = PGUtil.readInt32(await this._readBytes(4));
-        const data = await this._readBytes(rowLength);
-        return this._parseDbosRow(data);
+        this._diag.resReadDbosTupleCalls = (this._diag.resReadDbosTupleCalls || 0) + 1;
+        // In-place parsing: read from _intBuf directly without copying
+        await this._ensureBufferData(8);
+        const rowLength = this._intBuf.readInt32BE(this._intBufStart + 4);
+        const totalMsg = 8 + rowLength;
+        await this._ensureBufferData(totalMsg);
+        const row = this._parseDbosRowInPlace(this._intBuf, this._intBufStart + 8);
+        this._intBufStart += totalMsg;
+        return row;
     }
 
     private _parseDbosRow(data: Buffer): unknown[] {
+        return this._parseDbosRowInPlace(data, 0);
+    }
+
+    private _parseDbosRowInPlace(buffer: Buffer, baseOffset: number): unknown[] {
         const numFields = this._tupdesc.numFields;
         const parsers = this._binaryFieldParsers;
         const row = new Array(numFields);
+        this._diag.parseDbosRowCalls = (this._diag.parseDbosRowCalls || 0) + 1;
 
         // Pre-compute variable field offsets once per row (O(n) instead of O(n²))
         const numVaryingFields = this._tupdesc.numVaryingFields ?? 0;
-        let varOffsets: number[] | null = null;
         const fixedFieldsSize = this._tupdesc.fixedFieldsSize;
+        let varFieldStarts: number[] | null = null;
         if (numVaryingFields > 0) {
-            varOffsets = new Array(numVaryingFields);
-            let voff = fixedFieldsSize;
+            if (this._varOffsetsScratch.length < numVaryingFields) {
+                this._varOffsetsScratch = new Array(numVaryingFields);
+            }
+            varFieldStarts = this._varOffsetsScratch;
+            this._diag.parseDbosRowVarOffsetsAlloc = (this._diag.parseDbosRowVarOffsetsAlloc || 0) + 1;
+            let voff = baseOffset + fixedFieldsSize;
             for (let j = 0; j < numVaryingFields; j++) {
-                varOffsets[j] = voff;
-                const vlen = data.readUInt16LE(voff);
+                varFieldStarts[j] = voff;
+                const vlen = buffer.readUInt16LE(voff);
                 voff += vlen;
-                if (vlen % 2 !== 0) voff += 1; // 2-byte alignment
+                if (vlen % 2 !== 0) voff += 1;
             }
         }
 
         for (let i = 0; i < numFields; i++) {
-            if (this._columnIsNull(data, i)) {
+            if (this._columnIsNullInPlace(buffer, baseOffset, i)) {
                 row[i] = null;
                 continue;
             }
 
-            let fieldData: Buffer;
+            let fieldStart: number;
             const fixedSize = this._tupdesc.fieldFixedSize[i];
             if (fixedSize !== 0) {
-                fieldData = data.subarray(this._tupdesc.fieldOffset[i]);
-            } else if (varOffsets) {
-                const voff = varOffsets[this._tupdesc.fieldOffset[i]];
-                fieldData = data.subarray(voff);
+                fieldStart = baseOffset + this._tupdesc.fieldOffset[i];
+            } else if (varFieldStarts) {
+                fieldStart = varFieldStarts[this._tupdesc.fieldOffset[i]];
             } else {
-                fieldData = this._cTableFieldAt(data, i);
+                fieldStart = baseOffset + fixedFieldsSize;
             }
 
             const parser = parsers?.[i];
             if (parser) {
-                row[i] = parser(fieldData);
+                row[i] = parser(buffer, fieldStart);
             } else {
                 const fldType = this._tupdesc.fieldType[i];
                 const fldLen = this._tupdesc.fieldSize[i];
-                row[i] = this._parseFieldByType(fieldData, fldType, fldLen, i);
+                row[i] = this._parseFieldByTypeInPlace(buffer, fieldStart, fldType, fldLen, i);
             }
         }
 
         return row;
+    }
+
+    private _columnIsNullInPlace(buffer: Buffer, baseOffset: number, fieldLf: number): boolean {
+        if (!this._tupdesc.nullsAllowed) return false;
+        const byteOffset = baseOffset + this._tupdesc.fieldNullByteOffset[fieldLf];
+        const bitMask = this._tupdesc.fieldNullBitMask[fieldLf];
+        return (buffer[byteOffset] & bitMask) !== 0;
     }
 
     /**
@@ -1284,10 +1357,12 @@ class NzConnection extends EventEmitter {
      */
     private _tryReadDbosBatch(): unknown[][] {
         const rows: unknown[][] = [];
+        this._diag.tryReadDbosBatchCalls = (this._diag.tryReadDbosBatchCalls || 0) + 1;
 
         while (true) {
             const available = this._intBufEnd - this._intBufStart;
             if (available < 1) break;
+            this._diag.tryReadDbosBatchPeeks = (this._diag.tryReadDbosBatchPeeks || 0) + 1;
 
             // Next byte should be 'Y' (RowStandard)
             if (this._intBuf[this._intBufStart] !== 89) break;
@@ -1295,33 +1370,26 @@ class NzConnection extends EventEmitter {
             // We need: type(1) + msgLen(4) to compute total message size
             if (available < 5) break;
             const msgLen = this._intBuf.readInt32BE(this._intBufStart + 1);
-            const totalMsg = 1 + 4 + msgLen; // type + length_field + payload
+            const totalMsg = 1 + 4 + msgLen;
             if (available < totalMsg) break;
 
-            // msgLen must include at least [4 skip + 4 rowLen]
             if (msgLen < 8) break;
 
-            // Compute where payload starts (after type + length field)
             const payloadStart = this._intBufStart + 5;
             const payloadEnd = payloadStart + msgLen;
             if (payloadEnd > this._intBufEnd) break;
 
-            // Read rowLen from bytes 4..7 of payload
             const rowLen = this._intBuf.readInt32BE(payloadStart + 4);
-
-            // Validate rowLen: 8 + rowLen must equal msgLen
             if (rowLen <= 0 || (8 + rowLen) !== msgLen) break;
 
-            // Row data is bytes 8..(8+rowLen) of payload
+            // In-place parse without subarray
             const dataStart = payloadStart + 8;
-            const data = this._intBuf.subarray(dataStart, dataStart + rowLen);
+            rows.push(this._parseDbosRowInPlace(this._intBuf, dataStart));
 
-            // Advance past this complete message
             this._intBufStart = payloadEnd;
-
-            rows.push(this._parseDbosRow(data));
         }
 
+        this._diag.tryReadDbosBatchRows = (this._diag.tryReadDbosBatchRows || 0) + rows.length;
         return rows;
     }
 
@@ -1335,68 +1403,68 @@ class NzConnection extends EventEmitter {
 
             switch (fldType) {
                 case NzType.NzTypeChar:
-                    parsers[i] = (fieldData: Buffer) => fieldData.toString('latin1', 0, fldLen).trimEnd();
+                    parsers[i] = (buf: Buffer, off: number) => buf.toString('latin1', off, off + fldLen).trimEnd();
                     break;
                 case NzType.NzTypeNChar:
                 case NzType.NzTypeNVarChar:
-                    parsers[i] = (fieldData: Buffer) => {
-                        const cursize = fieldData.readInt16LE(0) - 2;
-                        return fieldData.toString('utf8', 2, 2 + cursize);
+                    parsers[i] = (buf: Buffer, off: number) => {
+                        const cursize = buf.readInt16LE(off) - 2;
+                        return buf.toString('utf8', off + 2, off + 2 + cursize);
                     };
                     break;
                 case NzType.NzTypeVarChar:
                 case NzType.NzTypeVarFixedChar:
-                    parsers[i] = (fieldData: Buffer) => {
-                        const cursize = fieldData.readInt16LE(0) - 2;
-                        return fieldData.toString('latin1', 2, 2 + cursize);
+                    parsers[i] = (buf: Buffer, off: number) => {
+                        const cursize = buf.readInt16LE(off) - 2;
+                        return buf.toString('latin1', off + 2, off + 2 + cursize);
                     };
                     break;
                 case NzType.NzTypeInt8:
-                    parsers[i] = (fieldData: Buffer) => fieldData.readBigInt64LE(0);
+                    parsers[i] = (buf: Buffer, off: number) => buf.readBigInt64LE(off);
                     break;
                 case NzType.NzTypeInt:
-                    parsers[i] = (fieldData: Buffer) => fieldData.readInt32LE(0);
+                    parsers[i] = (buf: Buffer, off: number) => buf.readInt32LE(off);
                     break;
                 case NzType.NzTypeInt2:
-                    parsers[i] = (fieldData: Buffer) => fieldData.readInt16LE(0);
+                    parsers[i] = (buf: Buffer, off: number) => buf.readInt16LE(off);
                     break;
                 case NzType.NzTypeInt1:
-                    parsers[i] = (fieldData: Buffer) => fieldData.readInt8(0);
+                    parsers[i] = (buf: Buffer, off: number) => buf.readInt8(off);
                     break;
                 case NzType.NzTypeDouble:
-                    parsers[i] = (fieldData: Buffer) => fieldData.readDoubleLE(0);
+                    parsers[i] = (buf: Buffer, off: number) => buf.readDoubleLE(off);
                     break;
                 case NzType.NzTypeFloat:
-                    parsers[i] = (fieldData: Buffer) => fieldData.readFloatLE(0);
+                    parsers[i] = (buf: Buffer, off: number) => buf.readFloatLE(off);
                     break;
                 case NzType.NzTypeDate:
-                    parsers[i] = TypeConversions.toDateTimeFrom4Bytes;
+                    parsers[i] = (buf: Buffer, off: number) => TypeConversions.toDateTimeFrom4Bytes(buf, off);
                     break;
                 case NzType.NzTypeTime:
-                    parsers[i] = TypeConversions.timeRecvFloat;
+                    parsers[i] = (buf: Buffer, off: number) => TypeConversions.timeRecvFloat(buf, off);
                     break;
                 case NzType.NzTypeInterval:
-                    parsers[i] = TypeConversions.intervalRecvFloat;
+                    parsers[i] = (buf: Buffer, off: number) => TypeConversions.intervalRecvFloat(buf, off);
                     break;
                 case NzType.NzTypeTimeTz:
-                    parsers[i] = (fieldData: Buffer) => TypeConversions.timetzOutput(fieldData, fldLen);
+                    parsers[i] = (buf: Buffer, off: number) => TypeConversions.timetzOutput(buf, fldLen, off);
                     break;
                 case NzType.NzTypeTimestamp:
-                    parsers[i] = TypeConversions.toDateTimeFrom8Bytes;
+                    parsers[i] = (buf: Buffer, off: number) => TypeConversions.toDateTimeFrom8Bytes(buf, off);
                     break;
                 case NzType.NzTypeBool:
-                    parsers[i] = (fieldData: Buffer) => fieldData[0] === 0x01;
+                    parsers[i] = (buf: Buffer, off: number) => buf[off] === 0x01;
                     break;
                 case NzType.NzTypeNumeric: {
                     const precision = this._tupdesc.getFieldPrecision(i);
                     const scale = this._tupdesc.getFieldScale(i);
                     const digitCount = this._tupdesc.getNumericDigitCount(i);
-                    parsers[i] = (fieldData: Buffer) =>
-                        TypeConversions.getCsNumeric(fieldData, precision, scale, digitCount);
+                    parsers[i] = (buf: Buffer, off: number) =>
+                        TypeConversions.getCsNumeric(buf, precision, scale, digitCount, off);
                     break;
                 }
                 default:
-                    parsers[i] = (fieldData: Buffer) => fieldData.toString('utf8', 0, fldLen);
+                    parsers[i] = (buf: Buffer, off: number) => buf.toString('utf8', off, off + fldLen);
                     break;
             }
         }
@@ -1405,71 +1473,60 @@ class NzConnection extends EventEmitter {
     }
 
     private _parseFieldByType(fieldData: Buffer, fldType: number, fldLen: number, fieldIdx: number): unknown {
+        return this._parseFieldByTypeInPlace(fieldData, 0, fldType, fldLen, fieldIdx);
+    }
+
+    private _parseFieldByTypeInPlace(buffer: Buffer, offset: number, fldType: number, fldLen: number, fieldIdx: number): unknown {
         switch (fldType) {
             case NzType.NzTypeChar:
-                return fieldData.toString('latin1', 0, fldLen).trimEnd();
+                return buffer.toString('latin1', offset, offset + fldLen).trimEnd();
             case NzType.NzTypeNChar:
             case NzType.NzTypeNVarChar: {
-                const cursize = fieldData.readInt16LE(0) - 2;
-                return fieldData.toString('utf8', 2, 2 + cursize);
+                const cursize = buffer.readInt16LE(offset) - 2;
+                return buffer.toString('utf8', offset + 2, offset + 2 + cursize);
             }
-
             case NzType.NzTypeVarChar:
             case NzType.NzTypeVarFixedChar: {
-                const s = fieldData.readInt16LE(0) - 2;
-                return fieldData.toString('latin1', 2, 2 + s);
+                const s = buffer.readInt16LE(offset) - 2;
+                return buffer.toString('latin1', offset + 2, offset + 2 + s);
             }
-
             case NzType.NzTypeInt8:
-                return fieldData.readBigInt64LE(0);
+                return buffer.readBigInt64LE(offset);
             case NzType.NzTypeInt:
-                return fieldData.readInt32LE(0);
+                return buffer.readInt32LE(offset);
             case NzType.NzTypeInt2:
-                return fieldData.readInt16LE(0);
+                return buffer.readInt16LE(offset);
             case NzType.NzTypeInt1:
-                return fieldData.readInt8(0);
+                return buffer.readInt8(offset);
             case NzType.NzTypeDouble:
-                return fieldData.readDoubleLE(0);
+                return buffer.readDoubleLE(offset);
             case NzType.NzTypeFloat:
-                return fieldData.readFloatLE(0);
+                return buffer.readFloatLE(offset);
             case NzType.NzTypeDate:
-                return TypeConversions.toDateTimeFrom4Bytes(fieldData);
+                return TypeConversions.toDateTimeFrom4Bytes(buffer, offset);
             case NzType.NzTypeTime:
-                return TypeConversions.timeRecvFloat(fieldData);
+                return TypeConversions.timeRecvFloat(buffer, offset);
             case NzType.NzTypeInterval:
-                return TypeConversions.intervalRecvFloat(fieldData);
+                return TypeConversions.intervalRecvFloat(buffer, offset);
             case NzType.NzTypeTimeTz:
-                return TypeConversions.timetzOutput(fieldData, fldLen);
+                return TypeConversions.timetzOutput(buffer, fldLen, offset);
             case NzType.NzTypeTimestamp:
-                return TypeConversions.toDateTimeFrom8Bytes(fieldData);
+                return TypeConversions.toDateTimeFrom8Bytes(buffer, offset);
             case NzType.NzTypeBool:
-                return fieldData[0] === 0x01;
+                return buffer[offset] === 0x01;
             case NzType.NzTypeNumeric: {
                 const p = this._tupdesc.getFieldPrecision(fieldIdx);
                 const s = this._tupdesc.getFieldScale(fieldIdx);
                 const c = this._tupdesc.getNumericDigitCount(fieldIdx);
-                return TypeConversions.getCsNumeric(fieldData, p, s, c);
+                return TypeConversions.getCsNumeric(buffer, p, s, c, offset);
             }
             default:
-                return fieldData.toString('utf8', 0, fldLen);
+                return buffer.toString('utf8', offset, offset + fldLen);
         }
     }
 
     private _columnIsNull(data: Buffer, fieldLf: number): boolean {
-        if (!this._tupdesc.nullsAllowed) return false;
-        const byteOffset = this._tupdesc.fieldNullByteOffset[fieldLf];
-        const bitMask = this._tupdesc.fieldNullBitMask[fieldLf];
-        return (data[byteOffset] & bitMask) !== 0;
-    }
-
-    private _cTableFieldAt(data: Buffer, i: number): Buffer {
-        if (this._tupdesc.fieldFixedSize[i] !== 0) return data.subarray(this._tupdesc.fieldOffset[i]);
-        let p = data.subarray(this._tupdesc.fixedFieldsSize);
-        for (let j = 0; j < this._tupdesc.fieldOffset[i]; j++) {
-            const l = p.readInt16LE(0);
-            p = p.subarray(l % 2 === 0 ? l : l + 1);
-        }
-        return p;
+        return this._columnIsNullInPlace(data, 0, fieldLf);
     }
 }
 

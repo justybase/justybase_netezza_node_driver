@@ -18,12 +18,10 @@ export const POSTGRES_EPOCH_MS = Date.UTC(2000, 0, 1);
  * Convert 8-byte timestamp (microseconds since 2000-01-01) to Date
  * @param data - 8 bytes little-endian
  */
-export function toDateTimeFrom8Bytes(data: Buffer): Date {
-    const micros = data.readBigInt64LE(0);
+export function toDateTimeFrom8Bytes(data: Buffer, offset: number = 0): Date {
+    const micros = data.readBigInt64LE(offset);
     const ms = Number(micros / 1000n);
-    const d1 = new Date(POSTGRES_EPOCH_MS + ms);
-    //const d2 =  new Date(d1.getUTCFullYear(), d1.getUTCMonth(), d1.getUTCDate(), d1.getUTCHours(), d1.getUTCMinutes(), d1.getUTCSeconds(), d1.getUTCMilliseconds());
-    return d1;
+    return new Date(POSTGRES_EPOCH_MS + ms);
 }
 
 const MS_PER_DAY = 86_400_000;
@@ -32,20 +30,17 @@ const MS_PER_DAY = 86_400_000;
  * Convert 4-byte date (days since 2000-01-01) to Date
  * @param data - 4 bytes little-endian
  */
-export function toDateTimeFrom4Bytes(data: Buffer): Date {
-    const days = data.readInt32LE(0);
-    const ms = days * MS_PER_DAY;
-    const d1 = new Date(POSTGRES_EPOCH_MS + ms);
-    //const d2 = new Date(d1.getUTCFullYear(), d1.getUTCMonth(), d1.getUTCDate());
-    return d1;
+export function toDateTimeFrom4Bytes(data: Buffer, offset: number = 0): Date {
+    const days = data.readInt32LE(offset);
+    return new Date(POSTGRES_EPOCH_MS + days * MS_PER_DAY);
 }
 
 /**
  * Convert 8-byte time (microseconds) to object
  * @param data - 8 bytes little-endian
  */
-export function timeRecvFloat(data: Buffer): TimeValue {
-    const micros = data.readBigInt64LE(0);
+export function timeRecvFloat(data: Buffer, offset: number = 0): TimeValue {
+    const micros = data.readBigInt64LE(offset);
     const totalSeconds = Number(micros / 1000000n);
     const remainingMicros = Number(micros % 1000000n);
 
@@ -102,12 +97,10 @@ export function parseTimeString(str: string | null): TimeValue | null {
  * Convert interval (8-byte micros + 4-byte months) to string
  * @param data - 12 bytes
  */
-export function intervalRecvFloat(data: Buffer): string {
-    // micros is read but timeRecvFloat handles the conversion
-    data.readBigInt64LE(0);
-    const months = data.readInt32LE(8);
+export function intervalRecvFloat(data: Buffer, offset: number = 0): string {
+    const months = data.readInt32LE(offset + 8);
 
-    const ts = timeRecvFloat(data);
+    const ts = timeRecvFloat(data, offset);
 
     if (months === 0) {
         return ts.toString();
@@ -127,9 +120,9 @@ export function intervalRecvFloat(data: Buffer): string {
  * @param data - 12 bytes
  * @param fldlen - field length
  */
-export function timetzOutput(data: Buffer, fldlen: number): string {
-    const time = timeRecvFloat(data);
-    const zoneSeconds = data.readInt32LE(fldlen - 4);
+export function timetzOutput(data: Buffer, fldlen: number, offset: number = 0): string {
+    const time = timeRecvFloat(data, offset);
+    const zoneSeconds = data.readInt32LE(offset + fldlen - 4);
 
     const tzSign = zoneSeconds < 0 ? '+' : '-';
     const absZone = Math.abs(zoneSeconds);
@@ -152,8 +145,8 @@ export function timetzOutput(data: Buffer, fldlen: number): string {
  * Used for system tables
  * @param data - 4 bytes
  */
-export function timestampRecvInt(data: Buffer): Date {
-    const seconds = data.readInt32LE(0);
+export function timestampRecvInt(data: Buffer, offset: number = 0): Date {
+    const seconds = data.readInt32LE(offset);
     return new Date(seconds * 1000);
 }
 
@@ -358,14 +351,14 @@ export function parseTextValue(value: string, typeOid: number, typeMod: number =
 
 const NUMERIC_PART_BITS = 32n;
 
-function readSignedNumericBigInt(data: Buffer, partCount: number): bigint {
+function readSignedNumericBigInt(data: Buffer, partCount: number, offset: number = 0): bigint {
     if (partCount <= 0) {
         return 0n;
     }
 
     let raw = 0n;
     for (let i = 0; i < partCount; i++) {
-        raw = (raw << NUMERIC_PART_BITS) | BigInt(data.readUInt32LE(i * 4));
+        raw = (raw << NUMERIC_PART_BITS) | BigInt(data.readUInt32LE(offset + i * 4));
     }
 
     const totalBits = BigInt(partCount) * NUMERIC_PART_BITS;
@@ -384,9 +377,39 @@ function readSignedNumericBigInt(data: Buffer, partCount: number): bigint {
  * @param scale - scale
  * @param digitCount - number of 32-bit digits
  */
-export function getCsNumeric(data: Buffer, prec: number, scale: number, digitCount: number): number | string {
+export function getCsNumeric(data: Buffer, prec: number, scale: number, digitCount: number, offset: number = 0): number | string {
     const partCount = digitCount > 0 ? digitCount : prec <= 9 ? 1 : prec <= 18 ? 2 : 4;
-    let unscaledValue = readSignedNumericBigInt(data, partCount);
+
+    // Fast path: partCount <= 2 and prec <= 15 -> use Number arithmetic, no BigInt
+    if (partCount <= 2 && prec <= 15) {
+        let unscaled: number;
+        if (partCount === 1) {
+            // PartCount=1: single 32-bit word at offset, two's complement
+            const word0 = data.readUInt32LE(offset);
+            unscaled = word0 >= 0x80000000 ? word0 - 0x100000000 : word0;
+        } else {
+            // PartCount=2: Netezza stores NUMERIC as big-endian 32-bit words (most significant first)
+            const hi = data.readInt32LE(offset);
+            const lo = data.readUInt32LE(offset + 4);
+            unscaled = hi * 0x100000000 + lo;
+        }
+        const isMinus = unscaled < 0;
+        if (isMinus) unscaled = -unscaled;
+        let result = String(unscaled);
+        if (scale !== 0) {
+            const padded = result.padStart(scale + 1, '0');
+            const decimalStart = padded.length - scale;
+            result = padded.slice(0, decimalStart) + '.' + padded.slice(decimalStart);
+        }
+        if (isMinus) result = '-' + result;
+        const num = parseFloat(result);
+        if (prec <= 15 && result === String(num)) {
+            return num;
+        }
+        return result;
+    }
+
+    let unscaledValue = readSignedNumericBigInt(data, partCount, offset);
     const isMinus = unscaledValue < 0n;
 
     if (isMinus) {
