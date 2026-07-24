@@ -12,7 +12,6 @@ import { DbosTupleDesc } from './DbosTupleDesc';
 import { BackendMessageCode, NzType, ExtabSock } from './protocol/constants';
 import * as TypeConversions from './types/TypeConversions';
 
-// eslint-disable-next-line @typescript-eslint/no-require-imports
 const debug = require('debug')('nz:connection');
 
 /**
@@ -28,7 +27,6 @@ const debug = require('debug')('nz:connection');
  */
 function parseCommandCompleteRows(commandText: string): number {
     // Remove trailing null byte and trim whitespace
-    // eslint-disable-next-line no-control-regex
     const cleanText = commandText.replace(/\x00/g, '').trim();
 
     // Split by whitespace

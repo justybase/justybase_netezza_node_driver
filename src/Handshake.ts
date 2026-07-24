@@ -7,7 +7,6 @@ import * as path from 'path';
 import { PGUtil } from './utils/PGUtil';
 import { BackendMessageCode, HandshakeCode, ProtocolVersion } from './protocol/constants';
 
-// eslint-disable-next-line @typescript-eslint/no-require-imports
 const debug = require('debug')('nz:handshake');
 
 interface HandshakeOptions {

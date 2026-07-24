@@ -2,7 +2,6 @@ import { EventEmitter } from 'events';
 import { NzConnection, NzConnectionConfig } from './NzConnection';
 import { NzDataReader } from './NzDataReader';
 
-// eslint-disable-next-line @typescript-eslint/no-require-imports
 const debug = require('debug')('nz:pool');
 
 /**

@@ -67,7 +67,6 @@ async function main() {
             const results = await nodeNzConn.execute(QUERY);
             // Access data to ensure it's read
             for (const row of results.rows) {
-                // eslint-disable-next-line no-unused-vars
                 for (const key in row) { /* no-op */ }
             }
         });
