@@ -58,3 +58,4 @@ Thumbs.db
 
 # Test results
 test-results.xml
+.cursor/

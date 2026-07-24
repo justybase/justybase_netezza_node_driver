@@ -482,8 +482,204 @@ class NzConnection extends EventEmitter {
         });
     }
 
+    private async _waitForReadableTimeout(timeoutMs: number): Promise<boolean> {
+        if (!this._socket || this._socket.destroyed) return false;
+        return new Promise((resolve) => {
+            let settled = false;
+            const cleanup = () => {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timer);
+                this._stream!.removeListener('readable', onReadable);
+                this._stream!.removeListener('close', onDone);
+                this._stream!.removeListener('error', onDone);
+                this._stream!.removeListener('end', onDone);
+            };
+            const onReadable = () => {
+                cleanup();
+                resolve(true);
+            };
+            const onDone = () => {
+                cleanup();
+                resolve(false);
+            };
+            const timer = setTimeout(() => {
+                cleanup();
+                resolve(false);
+            }, Math.max(1, timeoutMs));
+
+            this._stream!.once('readable', onReadable);
+            this._stream!.once('close', onDone);
+            this._stream!.once('end', onDone);
+            this._stream!.once('error', onDone);
+        });
+    }
+
     private _feedBuffer(buf: Buffer): void {
         this._stream!.unshift(buf);
+    }
+
+    /** Copy any already-buffered socket bytes into the internal parse buffer. */
+    private _pullAvailableFromStream(): number {
+        if (!this._stream) return 0;
+        let pulled = 0;
+        while (true) {
+            const chunk = this._stream.read() as Buffer | null;
+            if (chunk === null) break;
+            this._ensureBufferCapacity(chunk.length);
+            chunk.copy(this._intBuf, this._intBufEnd);
+            this._intBufEnd += chunk.length;
+            pulled += chunk.length;
+        }
+        return pulled;
+    }
+
+    private _discardLeadingNulls(): number {
+        let n = 0;
+        while (this._intBufStart < this._intBufEnd && this._intBuf[this._intBufStart] === 0) {
+            this._intBufStart++;
+            n++;
+        }
+        return n;
+    }
+
+    private _bufferedAvailable(): number {
+        return this._intBufEnd - this._intBufStart;
+    }
+
+    private async _waitForOrphanedBytes(needed: number, deadlineMs: number): Promise<boolean> {
+        while (this._bufferedAvailable() < needed) {
+            this._pullAvailableFromStream();
+            if (this._bufferedAvailable() >= needed) return true;
+            const remaining = deadlineMs - Date.now();
+            if (remaining <= 0) return false;
+            const got = await this._waitForReadableTimeout(Math.min(remaining, 250));
+            if (!got && this._bufferedAvailable() < needed) {
+                this._pullAvailableFromStream();
+                if (this._bufferedAvailable() >= needed) return true;
+                if (Date.now() >= deadlineMs) return false;
+            }
+        }
+        return true;
+    }
+
+    private _protocolSyncError(context: string, detail: string): Error {
+        const preview = String(context || '').replace(/\s+/g, ' ').slice(0, 80);
+        return new Error(
+            `Connection protocol out of sync before executing "${preview}": ${detail}. Reconnect required.`
+        );
+    }
+
+    /**
+     * If a previous command left an unread backend response on the wire/buffer
+     * (e.g. abandoned SELECT CURRENT_SID after cancel/timeout), consume it up to
+     * ReadyForQuery before sending the next query. Otherwise that leftover
+     * RowDescription/DataRow is incorrectly attributed to the new command.
+     */
+    private async _ensureProtocolSynced(context: string): Promise<void> {
+        const ORPHAN_DRAIN_MS = 2000;
+        this._pullAvailableFromStream();
+        this._discardLeadingNulls();
+        if (this._bufferedAvailable() <= 0) return;
+
+        debug('Orphaned backend data before command, draining:', this._bufferedAvailable(), context);
+        const deadline = Date.now() + ORPHAN_DRAIN_MS;
+
+        while (true) {
+            this._pullAvailableFromStream();
+            this._discardLeadingNulls();
+
+            if (this._bufferedAvailable() <= 0) {
+                // Do not treat empty buffer as synced — wait for ReadyForQuery / more data.
+                if (!(await this._waitForOrphanedBytes(1, deadline))) {
+                    throw this._protocolSyncError(context, 'orphaned response incomplete (no ReadyForQuery)');
+                }
+                continue;
+            }
+
+            if (!(await this._waitForOrphanedBytes(1, deadline))) {
+                throw this._protocolSyncError(context, 'truncated orphaned message type byte');
+            }
+
+            let type = await this._readByte();
+            while (type === 0) {
+                if (!(await this._waitForOrphanedBytes(1, deadline))) {
+                    throw this._protocolSyncError(context, 'truncated orphaned null padding');
+                }
+                type = await this._readByte();
+            }
+
+            if (!(await this._waitForOrphanedBytes(4, deadline))) {
+                throw this._protocolSyncError(context, `truncated orphaned header for type 0x${type.toString(16)}`);
+            }
+            await this._skipBytes(4);
+
+            if (type === BackendMessageCode.ReadyForQuery || type === 0x4c) {
+                this._discardLeadingNulls();
+                return;
+            }
+
+            if (type === BackendMessageCode.EmptyQueryResponse || type === 0x30 || type === 0x41) {
+                continue;
+            }
+
+            // Binary row: after the 4-byte header skip, payload is 8 + rowLength (same as _resReadDbosTuple).
+            if (type === BackendMessageCode.RowStandard) {
+                if (!(await this._waitForOrphanedBytes(8, deadline))) {
+                    throw this._protocolSyncError(context, 'truncated orphaned RowStandard header');
+                }
+                const rowLength = this._intBuf.readInt32BE(this._intBufStart + 4);
+                if (rowLength < 0 || rowLength > 10_000_000) {
+                    throw this._protocolSyncError(context, `invalid orphaned RowStandard rowLength=${rowLength}`);
+                }
+                const total = 8 + rowLength;
+                if (!(await this._waitForOrphanedBytes(total, deadline))) {
+                    throw this._protocolSyncError(context, 'truncated orphaned RowStandard payload');
+                }
+                await this._skipBytes(total);
+                continue;
+            }
+
+            if (
+                type === BackendMessageCode.CommandComplete ||
+                type === BackendMessageCode.ErrorResponse ||
+                type === BackendMessageCode.NoticeResponse ||
+                type === BackendMessageCode.RowDescription ||
+                type === BackendMessageCode.DataRow ||
+                type === BackendMessageCode.RowDescriptionStandard ||
+                type === 0x50
+            ) {
+                if (!(await this._waitForOrphanedBytes(4, deadline))) {
+                    throw this._protocolSyncError(context, `truncated orphaned length for type 0x${type.toString(16)}`);
+                }
+                const len = await this._readInt32();
+                if (len < 0 || len > 10_000_000) {
+                    throw this._protocolSyncError(context, `invalid orphaned length=${len} for type 0x${type.toString(16)}`);
+                }
+                if (len > 0) {
+                    if (!(await this._waitForOrphanedBytes(len, deadline))) {
+                        throw this._protocolSyncError(context, `truncated orphaned payload for type 0x${type.toString(16)}`);
+                    }
+                    await this._skipBytes(len);
+                }
+                continue;
+            }
+
+            // Unknown length-prefixed backend message
+            if (!(await this._waitForOrphanedBytes(4, deadline))) {
+                throw this._protocolSyncError(context, `truncated orphaned length for unknown type 0x${type.toString(16)}`);
+            }
+            const len = await this._readInt32();
+            if (len < 0 || len > 10_000_000) {
+                throw this._protocolSyncError(context, `invalid orphaned length=${len} for unknown type 0x${type.toString(16)}`);
+            }
+            if (len > 0) {
+                if (!(await this._waitForOrphanedBytes(len, deadline))) {
+                    throw this._protocolSyncError(context, `truncated orphaned payload for unknown type 0x${type.toString(16)}`);
+                }
+                await this._skipBytes(len);
+            }
+        }
     }
 
     private async _readInt32(): Promise<number> {
@@ -574,6 +770,7 @@ class NzConnection extends EventEmitter {
         this._commandGeneration++;
         try {
             debug('Executing:', command.commandText);
+            await this._ensureProtocolSynced(command.commandText);
             this._preExecution(command);
 
             let error: Error | null = null;
@@ -637,6 +834,7 @@ class NzConnection extends EventEmitter {
 
         try {
             debug('Executing Reader:', command.commandText);
+            await this._ensureProtocolSynced(command.commandText);
             this._preExecution(command);
 
             const generator = this._responseGenerator(command);
