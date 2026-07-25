@@ -39,8 +39,8 @@ function parseCommandCompleteRows(commandText: string): number {
     const values = cleanText.split(/\s+/);
     const command = values[0];
 
-    // Commands that have row counts (same as C# driver)
-    const commandsWithCount = ['INSERT', 'UPDATE', 'DELETE'];
+    // Commands that have row counts (same as C# driver, plus SELECT when server reports it)
+    const commandsWithCount = ['INSERT', 'UPDATE', 'DELETE', 'SELECT'];
 
     if (commandsWithCount.includes(command.toUpperCase())) {
         // Take the last value as row count (same as C#: values[^1])
@@ -239,13 +239,28 @@ class NzConnection extends EventEmitter {
                         reject(new Error('Not connected'));
                         return;
                     }
-                    const ok = this._stream.write(data, (err) => {
-                        if (err) reject(err);
-                    });
-                    if (ok) {
+                    // Resolve/reject only from the write callback (or drain) so a late
+                    // socket error cannot reject after the promise already settled.
+                    let settled = false;
+                    const fail = (err: Error) => {
+                        if (settled) return;
+                        settled = true;
+                        reject(err);
+                    };
+                    const succeed = () => {
+                        if (settled) return;
+                        settled = true;
                         resolve();
-                    } else {
-                        this._stream.once('drain', resolve);
+                    };
+                    const ok = this._stream.write(data, (err) => {
+                        if (err) {
+                            fail(err);
+                            return;
+                        }
+                        if (ok) succeed();
+                    });
+                    if (!ok) {
+                        this._stream.once('drain', succeed);
                     }
                 });
             },
@@ -444,6 +459,12 @@ class NzConnection extends EventEmitter {
 
     async [Symbol.asyncDispose](): Promise<void> {
         return this.close();
+    }
+
+    private _assertCanExecute(): void {
+        if (this._closing || !this._connected || !this._stream) {
+            throw new Error('Connection is closed');
+        }
     }
 
     createCommand(sql?: string, params?: unknown[]): NzCommand {
@@ -936,6 +957,7 @@ class NzConnection extends EventEmitter {
     }
 
     private async _doExecute(command: NzCommand): Promise<boolean> {
+        this._assertCanExecute();
         if (this._executing) {
             throw new Error('Connection is already executing a command');
         }
@@ -944,18 +966,30 @@ class NzConnection extends EventEmitter {
         try {
             debug('Executing:', command.commandText);
             await this._ensureProtocolSynced(command.commandText);
+            this._assertCanExecute();
             this._preExecution(command);
 
             let error: Error | null = null;
             const notices: string[] = [];
+            let rowsSeen = 0;
+            let sawResultSet = false;
             for await (const msg of this._responseGenerator(command)) {
                 if (msg.type === 'ErrorResponse') {
                     error = msg.error || createNzDatabaseError(msg.message);
                 } else if (msg.type === 'NoticeResponse') {
                     notices.push(msg.message);
+                } else if (msg.type === 'RowDescription' || msg.type === 'RowDescriptionStandard') {
+                    sawResultSet = true;
+                } else if (msg.type === 'DataRow') {
+                    sawResultSet = true;
+                    rowsSeen += 1;
                 }
             }
             command._notices = notices;
+            // SELECT (and similar) CommandComplete often has no row count; use drained rows.
+            if (command._recordsAffected < 0 && sawResultSet) {
+                command._recordsAffected = rowsSeen;
+            }
             if (error) throw error;
             return true;
         } finally {
@@ -998,6 +1032,7 @@ class NzConnection extends EventEmitter {
     }
 
     private async _doExecuteReader(command: NzCommand): Promise<NzDataReader> {
+        this._assertCanExecute();
         if (this._executing) {
             throw new Error('Connection is already executing a command');
         }
@@ -1008,6 +1043,7 @@ class NzConnection extends EventEmitter {
         try {
             debug('Executing Reader:', command.commandText);
             await this._ensureProtocolSynced(command.commandText);
+            this._assertCanExecute();
             this._preExecution(command);
 
             const generator = this._responseGenerator(command);
