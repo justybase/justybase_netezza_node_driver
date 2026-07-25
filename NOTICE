@@ -1,0 +1,15 @@
+Apache Netezza Node.js Driver
+Copyright (c) 2025, Krzysztof Duśko
+
+This product includes software developed for IBM Netezza / PureData System for
+Analytics connectivity and is released under the Apache License, Version 2.0.
+
+Copyright notices from LICENSE also include:
+
+- Copyright (c) 2020, IBM
+- Copyright (c) 2007-2009, Mathieu Fenniak
+
+Portions of the protocol and client design are informed by historical Netezza /
+PostgreSQL-wire lineage and by concepts from the Npgsql PostgreSQL .NET data
+provider originally created by Mathieu Fenniak. This package is an independent
+TypeScript implementation and is not affiliated with IBM or the Npgsql project.

@@ -18,6 +18,20 @@ export const BackendMessageCode = {
     CopyOutResponse: 'H'.charCodeAt(0), // 72
     CopyDone: 'c'.charCodeAt(0), // 99
     CopyData: 'd'.charCodeAt(0), // 100
+    /**
+     * Netezza-specific: alternate ready/idle marker observed as ASCII 'L' (0x4c).
+     * Treated like ReadyForQuery when draining the protocol.
+     */
+    ReadyForQueryAlt: 0x4c,
+    /** Netezza-specific skippable control byte ASCII '0' (0x30) */
+    ControlZero: 0x30,
+    /** Netezza-specific skippable control byte ASCII 'A' (0x41) */
+    ControlA: 0x41,
+    /**
+     * Netezza-specific payload prefix ASCII 'P' (0x50) with a following length+body.
+     * Distinct from the client Query ('P') message we send.
+     */
+    BackendPayloadP: 0x50,
 } as const;
 
 export type BackendMessageCodeType = (typeof BackendMessageCode)[keyof typeof BackendMessageCode];

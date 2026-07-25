@@ -3,19 +3,16 @@
  * Fast tests covering more functionality without long-running operations
  */
 
-const { NzConnection } = require('../dist/NzConnection');
+const { NzConnection } = require('../dist/cjs/NzConnection');
 
-const config = {
-    host: '192.168.0.144',
-    port: 5480,
-    database: 'JUST_DATA',
-    user: 'admin',
-    password: process.env.NZ_DEV_PASSWORD || 'password'
-};
+const { getNzConfig } = require('./helpers/env');
+const config = (() => { try { return getNzConfig(); } catch (e) { return null; } })();
+const describeNz = config ? describe : describe.skip;
+
 
 const TEST_TABLE = 'JUST_DATA.ADMIN.DIMDATE';
 
-describe('Additional Smoke Tests - Expressions & Functions', () => {
+describeNz('Additional Smoke Tests - Expressions & Functions', () => {
     let conn;
 
     beforeAll(async () => {
@@ -192,7 +189,7 @@ describe('Additional Smoke Tests - Expressions & Functions', () => {
     });
 });
 
-describe('Additional Smoke Tests - Connection & State', () => {
+describeNz('Additional Smoke Tests - Connection & State', () => {
     let conn;
 
     beforeAll(async () => {
@@ -313,7 +310,7 @@ describe('Additional Smoke Tests - Connection & State', () => {
     });
 });
 
-describe('Additional Smoke Tests - Multiple Result Sets', () => {
+describeNz('Additional Smoke Tests - Multiple Result Sets', () => {
     let conn;
 
     beforeAll(async () => {
@@ -360,7 +357,7 @@ describe('Additional Smoke Tests - Multiple Result Sets', () => {
     });
 });
 
-describe('Additional Smoke Tests - Error Handling', () => {
+describeNz('Additional Smoke Tests - Error Handling', () => {
     let conn;
 
     beforeAll(async () => {

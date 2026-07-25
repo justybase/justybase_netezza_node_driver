@@ -1,15 +1,12 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { NzConnection } = require('../dist/NzConnection');
+const { NzConnection } = require('../dist/cjs/NzConnection');
 
-const config = {
-    host: '192.168.0.144',
-    port: 5480,
-    database: 'JUST_DATA',
-    user: 'admin',
-    password: process.env.NZ_DEV_PASSWORD || 'password'
-};
+const { getNzConfig } = require('./helpers/env');
+const config = (() => { try { return getNzConfig(); } catch (e) { return null; } })();
+const describeNz = config ? describe : describe.skip;
+
 
 const TEMP_DIR = process.env.NZ_LOCAL_TMP_DIR || path.join(os.tmpdir(), 'justybase-netezza-driver');
 const TEST_FILE = path.join(TEMP_DIR, 'js_et_test.dat');
@@ -39,7 +36,7 @@ async function readAllRows(reader) {
     return rows;
 }
 
-describe('NzDriver - External Tables', () => {
+describeNz('NzDriver - External Tables', () => {
     let conn;
 
     beforeAll(async () => {

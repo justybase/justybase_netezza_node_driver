@@ -1,5 +1,5 @@
-const { NzDataReader } = require('../dist/NzDataReader');
-const { NzCommand } = require('../dist/NzCommand');
+const { NzDataReader } = require('../dist/cjs/NzDataReader');
+const { NzCommand } = require('../dist/cjs/NzCommand');
 
 // Mock NzCommand for testing
 class MockNzCommand {

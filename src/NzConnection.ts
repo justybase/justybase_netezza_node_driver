@@ -1,7 +1,6 @@
 import * as net from 'net';
 import * as tls from 'tls';
-import * as fs from 'fs';
-import * as path from 'path';
+import type { WriteStream } from 'fs';
 import { Readable } from 'stream';
 import { EventEmitter } from 'events';
 import { Handshake } from './Handshake';
@@ -9,10 +8,17 @@ import { PGUtil } from './utils/PGUtil';
 import { NzCommand } from './NzCommand';
 import { NzDataReader, GeneratorItem, ColumnDescription } from './NzDataReader';
 import { DbosTupleDesc } from './DbosTupleDesc';
-import { BackendMessageCode, NzType, ExtabSock } from './protocol/constants';
+import { BackendMessageCode, NzType } from './protocol/constants';
+import { buildSimpleQueryPacket } from './protocol/QueryExecutor';
+import { ColumnInfo, ResponseMessage } from './protocol/messages';
 import * as TypeConversions from './types/TypeConversions';
+import { createNzDatabaseError } from './errors/NzDatabaseError';
+import { substituteParameters } from './protocol/sqlParameters';
+import { parseConnectionString } from './connectionString';
+import { ExternalTableHandler, ExternalTableIO } from './external/ExternalTableHandler';
+import createDebug from 'debug';
 
-const debug = require('debug')('nz:connection');
+const debug = createDebug('nz:connection');
 
 /**
  * Parse rows affected from Netezza CommandComplete message.
@@ -73,29 +79,32 @@ export interface NzConnectionConfig {
     clientHostName?: string;
 }
 
-interface ColumnInfo {
-    name: string;
-    typeOid: number;
-    typeLen: number;
-    typeMod: number;
-    format: number;
+export interface QueryResult {
+    rows: Record<string, unknown>[];
+    rowCount: number;
+    fields: { name: string; dataTypeID: number; dataTypeSize: number; dataTypeModifier: number }[];
+    notices: string[];
+}
+
+export interface ExecuteResult {
+    rowCount: number;
+    notices: string[];
 }
 
 type Stream = net.Socket | tls.TLSSocket;
-
-type ResponseMessage =
-    | { type: 'ErrorResponse'; message: string }
-    | { type: 'RowDescription'; columns: ColumnInfo[] }
-    | { type: 'RowDescriptionStandard'; desc: DbosTupleDesc }
-    | { type: 'DataRow'; row: unknown[] }
-    | { type: 'CommandComplete'; text: string; rowsAffected: number }
-    | { type: 'NoticeResponse'; message: string }
-    | { type: 'ReadyForQuery' };
 
 type TextValueParser = (value: string) => unknown;
 type TextBufferParser = (data: Buffer, offset: number, len: number) => unknown;
 type BinaryFieldParser = (buffer: Buffer, fieldStart: number) => unknown;
 
+/**
+ * Netezza database connection.
+ *
+ * Events:
+ * - `notice` — server NoticeResponse (`{ message: string }`)
+ * - `error` — socket/protocol error after connect
+ * - `close` — underlying socket closed
+ */
 class NzConnection extends EventEmitter {
     config: NzConnectionConfig;
     private _socket: net.Socket | null = null;
@@ -106,6 +115,7 @@ class NzConnection extends EventEmitter {
     /** Incremented on every command execution. Used to detect stale timeout-cancel calls. */
     private _commandGeneration: number = 0;
     private _connected: boolean = false;
+    private _closing: boolean = false;
     private _rowDescription: ColumnInfo[] | null = null;
     private _textColumnParsers: TextValueParser[] | null = null;
     private _textBufferParsers: (TextBufferParser | null)[] | null = null;
@@ -117,7 +127,11 @@ class NzConnection extends EventEmitter {
     private _varOffsetsScratch: number[] = [];
 
     // Diagnostics counters
-    _diag: Record<string, number> = {};
+    private _diag: Record<string, number> = {};
+    /** Read-only view of internal protocol/performance counters */
+    get diagnostics(): Readonly<Record<string, number>> {
+        return this._diag;
+    }
     private _resetDiag(): void {
         this._diag = {
             readBytesCalls: 0,
@@ -191,7 +205,8 @@ class NzConnection extends EventEmitter {
     commandTimeout: number = 30;
     connectionTimeout: number = 10; // Default 10 seconds for connection timeout
     private _executing: boolean = false;
-    private _exportStream: fs.WriteStream | null = null;
+    private _exportStream: WriteStream | null = null;
+    private readonly _external: ExternalTableHandler;
 
     // Static registry for virtual import streams
     private static _streamRegistry: Map<string, Readable> = new Map();
@@ -204,13 +219,44 @@ class NzConnection extends EventEmitter {
         this._streamRegistry.delete(id);
     }
 
-    constructor(config: NzConnectionConfig) {
+    constructor(config: NzConnectionConfig | string) {
         super();
-        this.config = config;
+        this.config = typeof config === 'string' ? parseConnectionString(config) : config;
         this._initBuffer();
-        if (config.connectionTimeout !== undefined) {
-            this.connectionTimeout = config.connectionTimeout;
+        if (this.config.connectionTimeout !== undefined) {
+            this.connectionTimeout = this.config.connectionTimeout;
         }
+        this._external = new ExternalTableHandler(this._createExternalTableIO());
+    }
+
+    private _createExternalTableIO(): ExternalTableIO {
+        return {
+            readBytes: (n) => this._readBytes(n),
+            readInt32: () => this._readInt32(),
+            write: (data) => {
+                return new Promise<void>((resolve, reject) => {
+                    if (!this._stream) {
+                        reject(new Error('Not connected'));
+                        return;
+                    }
+                    const ok = this._stream.write(data, (err) => {
+                        if (err) reject(err);
+                    });
+                    if (ok) {
+                        resolve();
+                    } else {
+                        this._stream.once('drain', resolve);
+                    }
+                });
+            },
+            emit: (event, ...args) => this.emit(event, ...args),
+            getExportStream: () => this._exportStream,
+            setExportStream: (s) => {
+                this._exportStream = s;
+            },
+            hasImportStream: (id) => NzConnection._streamRegistry.has(id),
+            getImportStream: (id) => NzConnection._streamRegistry.get(id)!,
+        };
     }
 
     async connect(): Promise<void> {
@@ -349,11 +395,55 @@ class NzConnection extends EventEmitter {
         });
     }
 
-    close(): void {
-        if (this._socket) {
-            this._socket.end();
-            this._socket.destroy();
+    /**
+     * Close the connection. Idempotent — safe to call multiple times.
+     * Emits `close` when the underlying socket closes.
+     */
+    async close(): Promise<void> {
+        if (this._closing) {
+            return;
         }
+        if (!this._socket || this._socket.destroyed) {
+            this._connected = false;
+            this._socket = null;
+            this._stream = null;
+            return;
+        }
+
+        this._closing = true;
+        this._connected = false;
+        const sock = this._socket;
+
+        await new Promise<void>((resolve) => {
+            let settled = false;
+            const done = () => {
+                if (settled) return;
+                settled = true;
+                resolve();
+            };
+            sock.once('close', done);
+            try {
+                sock.end();
+            } catch {
+                /* ignore */
+            }
+            try {
+                sock.destroy();
+            } catch {
+                /* ignore */
+            }
+            if (sock.destroyed) {
+                done();
+            }
+        });
+
+        this._socket = null;
+        this._stream = null;
+        this._closing = false;
+    }
+
+    async [Symbol.asyncDispose](): Promise<void> {
+        return this.close();
     }
 
     createCommand(sql?: string, params?: unknown[]): NzCommand {
@@ -376,6 +466,53 @@ class NzConnection extends EventEmitter {
     async rollback(): Promise<void> {
         const cmd = this.createCommand('ROLLBACK');
         await this.execute(cmd);
+    }
+
+    /**
+     * Run `fn` inside a BEGIN/COMMIT transaction. Rolls back on throw.
+     */
+    async transaction<T>(fn: (conn: this) => Promise<T>): Promise<T> {
+        await this.beginTransaction();
+        try {
+            const result = await fn(this);
+            await this.commit();
+            return result;
+        } catch (err) {
+            try {
+                await this.rollback();
+            } catch {
+                /* ignore rollback failure */
+            }
+            throw err;
+        }
+    }
+
+    /**
+     * Execute SQL and buffer all rows. Parameters use client-side escaped interpolation ($1, $2, ...).
+     */
+    async query(sql: string, params?: unknown[]): Promise<QueryResult> {
+        const cmd = this.createCommand(sql, params);
+        const reader = await this.executeReader(cmd);
+        try {
+            const rows: Record<string, unknown>[] = [];
+            while (await reader.read()) {
+                rows.push(reader.getRowObject()!);
+            }
+            const fields = (reader.columnDescriptions || []).map((c) => ({
+                name: c.name,
+                dataTypeID: c.typeOid,
+                dataTypeSize: c.typeLen,
+                dataTypeModifier: c.typeMod,
+            }));
+            return {
+                rows,
+                rowCount: cmd._recordsAffected >= 0 ? cmd._recordsAffected : rows.length,
+                fields,
+                notices: [...cmd.notices],
+            };
+        } finally {
+            await reader.close();
+        }
     }
 
     private async _skipBytes(n: number): Promise<void> {
@@ -501,10 +638,13 @@ class NzConnection extends EventEmitter {
                 cleanup();
                 resolve(false);
             };
-            const timer = setTimeout(() => {
-                cleanup();
-                resolve(false);
-            }, Math.max(1, timeoutMs));
+            const timer = setTimeout(
+                () => {
+                    cleanup();
+                    resolve(false);
+                },
+                Math.max(1, timeoutMs)
+            );
 
             this._stream!.once('readable', onReadable);
             this._stream!.once('close', onDone);
@@ -562,7 +702,9 @@ class NzConnection extends EventEmitter {
     }
 
     private _protocolSyncError(context: string, detail: string): Error {
-        const preview = String(context || '').replace(/\s+/g, ' ').slice(0, 80);
+        const preview = String(context || '')
+            .replace(/\s+/g, ' ')
+            .slice(0, 80);
         return new Error(
             `Connection protocol out of sync before executing "${preview}": ${detail}. Reconnect required.`
         );
@@ -612,12 +754,16 @@ class NzConnection extends EventEmitter {
             }
             await this._skipBytes(4);
 
-            if (type === BackendMessageCode.ReadyForQuery || type === 0x4c) {
+            if (type === BackendMessageCode.ReadyForQuery || type === BackendMessageCode.ReadyForQueryAlt) {
                 this._discardLeadingNulls();
                 return;
             }
 
-            if (type === BackendMessageCode.EmptyQueryResponse || type === 0x30 || type === 0x41) {
+            if (
+                type === BackendMessageCode.EmptyQueryResponse ||
+                type === BackendMessageCode.ControlZero ||
+                type === BackendMessageCode.ControlA
+            ) {
                 continue;
             }
 
@@ -645,18 +791,24 @@ class NzConnection extends EventEmitter {
                 type === BackendMessageCode.RowDescription ||
                 type === BackendMessageCode.DataRow ||
                 type === BackendMessageCode.RowDescriptionStandard ||
-                type === 0x50
+                type === BackendMessageCode.BackendPayloadP
             ) {
                 if (!(await this._waitForOrphanedBytes(4, deadline))) {
                     throw this._protocolSyncError(context, `truncated orphaned length for type 0x${type.toString(16)}`);
                 }
                 const len = await this._readInt32();
                 if (len < 0 || len > 10_000_000) {
-                    throw this._protocolSyncError(context, `invalid orphaned length=${len} for type 0x${type.toString(16)}`);
+                    throw this._protocolSyncError(
+                        context,
+                        `invalid orphaned length=${len} for type 0x${type.toString(16)}`
+                    );
                 }
                 if (len > 0) {
                     if (!(await this._waitForOrphanedBytes(len, deadline))) {
-                        throw this._protocolSyncError(context, `truncated orphaned payload for type 0x${type.toString(16)}`);
+                        throw this._protocolSyncError(
+                            context,
+                            `truncated orphaned payload for type 0x${type.toString(16)}`
+                        );
                     }
                     await this._skipBytes(len);
                 }
@@ -665,15 +817,24 @@ class NzConnection extends EventEmitter {
 
             // Unknown length-prefixed backend message
             if (!(await this._waitForOrphanedBytes(4, deadline))) {
-                throw this._protocolSyncError(context, `truncated orphaned length for unknown type 0x${type.toString(16)}`);
+                throw this._protocolSyncError(
+                    context,
+                    `truncated orphaned length for unknown type 0x${type.toString(16)}`
+                );
             }
             const len = await this._readInt32();
             if (len < 0 || len > 10_000_000) {
-                throw this._protocolSyncError(context, `invalid orphaned length=${len} for unknown type 0x${type.toString(16)}`);
+                throw this._protocolSyncError(
+                    context,
+                    `invalid orphaned length=${len} for unknown type 0x${type.toString(16)}`
+                );
             }
             if (len > 0) {
                 if (!(await this._waitForOrphanedBytes(len, deadline))) {
-                    throw this._protocolSyncError(context, `truncated orphaned payload for unknown type 0x${type.toString(16)}`);
+                    throw this._protocolSyncError(
+                        context,
+                        `truncated orphaned payload for unknown type 0x${type.toString(16)}`
+                    );
                 }
                 await this._skipBytes(len);
             }
@@ -726,15 +887,29 @@ class NzConnection extends EventEmitter {
         }
     }
 
-    async execute(command: NzCommand, _bufferOnly: boolean = false): Promise<boolean> {
-        const timeoutSeconds = command.commandTimeout;
+    async execute(command: NzCommand, bufferOnly?: boolean): Promise<boolean>;
+    async execute(sql: string, params?: unknown[]): Promise<ExecuteResult>;
+    async execute(
+        commandOrSql: NzCommand | string,
+        bufferOnlyOrParams: boolean | unknown[] = false
+    ): Promise<boolean | ExecuteResult> {
+        if (typeof commandOrSql === 'string') {
+            const cmd = this.createCommand(
+                commandOrSql,
+                Array.isArray(bufferOnlyOrParams) ? bufferOnlyOrParams : undefined
+            );
+            const rowCount = await cmd.executeNonQuery();
+            return { rowCount, notices: [...cmd.notices] };
+        }
+
+        const timeoutSeconds = commandOrSql.commandTimeout;
         if (!timeoutSeconds || timeoutSeconds <= 0) {
-            return this._doExecute(command);
+            return this._doExecute(commandOrSql);
         }
 
         const execGen = this._commandGeneration + 1;
         let timer: NodeJS.Timeout | undefined;
-        const execPromise = this._doExecute(command);
+        const execPromise = this._doExecute(commandOrSql);
 
         const timeoutPromise = new Promise<boolean>((resolve, reject) => {
             timer = setTimeout(async () => {
@@ -775,7 +950,7 @@ class NzConnection extends EventEmitter {
             const notices: string[] = [];
             for await (const msg of this._responseGenerator(command)) {
                 if (msg.type === 'ErrorResponse') {
-                    error = new Error('Netezza Error: ' + msg.message);
+                    error = msg.error || createNzDatabaseError(msg.message);
                 } else if (msg.type === 'NoticeResponse') {
                     notices.push(msg.message);
                 }
@@ -854,7 +1029,7 @@ class NzConnection extends EventEmitter {
                     if (desc && desc.numFields > 0) {
                         columnNullability = [...desc.fieldNullAllowed];
                         if (columns.length === 0) {
-                            const ps = command._preparedStatement;
+                            const ps = command._cachedRowDescription;
                             if (ps && ps.description) {
                                 columns = ps.description;
                             }
@@ -866,7 +1041,7 @@ class NzConnection extends EventEmitter {
                         break;
                     }
                 } else if (val.type === 'ErrorResponse') {
-                    error = new Error('Netezza Error: ' + val.message);
+                    error = val.error || createNzDatabaseError(val.message);
                 } else if (val.type === 'NoticeResponse') {
                     notices.push(val.message);
                 }
@@ -897,49 +1072,14 @@ class NzConnection extends EventEmitter {
         }
     }
 
-    private _escapeLiteral(value: unknown): string {
-        if (value === null || value === undefined) return 'NULL';
-        if (typeof value === 'boolean') return value ? "'t'" : "'f'";
-        if (typeof value === 'number' || typeof value === 'bigint') return String(value);
-        if (typeof value === 'string') {
-            const escaped = value.replace(/'/g, "''");
-            return `'${escaped}'`;
-        }
-        if (value instanceof Date) return `'${value.toISOString().replace('T', ' ').replace(/\.\d{3}Z$/, '')}'`;
-        if (Buffer.isBuffer(value)) {
-            const hex = value.toString('hex');
-            return `E'\\\\x${hex}'`;
-        }
-        if (typeof (value as { toString: () => string }).toString === 'function') {
-            const str = (value as { toString: () => string }).toString();
-            const escaped = str.replace(/'/g, "''");
-            return `'${escaped}'`;
-        }
-        return `'${String(value)}'`;
-    }
-
-    private _substituteParameters(sql: string, params: unknown[]): string {
-        if (!params || params.length === 0) return sql;
-        return sql.replace(/\$(\d+)/g, (_match, indexStr: string) => {
-            const idx = parseInt(indexStr, 10) - 1;
-            if (idx < 0 || idx >= params.length) return _match;
-            return this._escapeLiteral(params[idx]);
-        });
-    }
-
     private _preExecution(command: NzCommand): void {
-        const query = command.parameters && command.parameters.length > 0
-            ? this._substituteParameters(command.commandText, command.parameters)
-            : command.commandText;
-        const queryBytes = Buffer.from(query, 'utf8');
-        const buf = Buffer.allocUnsafe(1 + 4 + queryBytes.length + 1);
-        buf[0] = 'P'.charCodeAt(0);
+        const query =
+            command.parameters && command.parameters.length > 0
+                ? substituteParameters(command.commandText, command.parameters)
+                : command.commandText;
         this._commandNumber++;
         if (this._commandNumber > 100000) this._commandNumber = 1;
-        buf.writeInt32BE(this._commandNumber, 1);
-        queryBytes.copy(buf, 5);
-        buf[5 + queryBytes.length] = 0;
-        this._stream!.write(buf);
+        this._stream!.write(buildSimpleQueryPacket(query, this._commandNumber));
     }
 
     private async *_responseGenerator(command: NzCommand): AsyncGenerator<ResponseMessage> {
@@ -971,17 +1111,17 @@ class NzConnection extends EventEmitter {
             }
 
             if (type === 'u'.charCodeAt(0)) {
-                await this._handleExternalTableExportStart();
+                await this._external.handleExportStart();
                 continue;
             }
 
             if (type === 'U'.charCodeAt(0)) {
-                await this._handleExternalTableExportData();
+                await this._external.handleExportData();
                 continue;
             }
 
             if (type === 'l'.charCodeAt(0)) {
-                await this._handleExternalTableImport();
+                await this._external.handleImport();
                 continue;
             }
 
@@ -1011,7 +1151,7 @@ class NzConnection extends EventEmitter {
                 const logTypeBuf = await this._readBytes(4);
                 const logType = PGUtil.readInt32(logTypeBuf);
 
-                await this._saveExternalTableLog(logDir, filename, logType);
+                await this._external.saveLog(logDir, filename, logType);
                 continue;
             }
 
@@ -1037,15 +1177,15 @@ class NzConnection extends EventEmitter {
                 continue;
             }
 
-            if (type === 0x4c) {
+            if (type === BackendMessageCode.ReadyForQueryAlt) {
                 completed = true;
                 continue;
             }
-            if (type === 0x30 || type === 0x41) {
+            if (type === BackendMessageCode.ControlZero || type === BackendMessageCode.ControlA) {
                 continue;
             }
 
-            if (type === 0x50) {
+            if (type === BackendMessageCode.BackendPayloadP) {
                 const len = await this._readInt32();
                 await this._readBytes(len);
                 continue;
@@ -1054,7 +1194,8 @@ class NzConnection extends EventEmitter {
             if (type === BackendMessageCode.ErrorResponse) {
                 const len = await this._readInt32();
                 const data = await this._readBytes(len);
-                yield { type: 'ErrorResponse', message: data.toString('utf8') };
+                const err = createNzDatabaseError(data);
+                yield { type: 'ErrorResponse', message: err.message, error: err };
                 continue;
             }
 
@@ -1082,7 +1223,7 @@ class NzConnection extends EventEmitter {
             if (type === BackendMessageCode.RowDescriptionStandard) {
                 const len = await this._readInt32();
                 const data = await this._readBytes(len);
-                this._tupdesc.parse(data, command._preparedStatement);
+                this._tupdesc.parse(data, command._cachedRowDescription);
                 this._binaryFieldParsers = this._buildBinaryFieldParsers();
                 yield { type: 'RowDescriptionStandard', desc: this._tupdesc };
                 continue;
@@ -1118,263 +1259,6 @@ class NzConnection extends EventEmitter {
                 /* ignore */
             }
         }
-    }
-
-    private async _saveExternalTableLog(logDir: string, filename: string, logType: number): Promise<void> {
-        // Determine file extension based on logType (same as C# implementation)
-        let extension: string;
-        if (logType === 1) {
-            extension = '.nzlog';
-        } else if (logType === 2) {
-            extension = '.nzbad';
-        } else if (logType === 3) {
-            extension = '.nzstats';
-        } else {
-            extension = '.log';
-        }
-
-        // Construct full path
-        const fullPath = path.join(logDir, filename + extension);
-        debug('Saving external table log to:', fullPath);
-
-        const writeStream = fs.createWriteStream(fullPath, { encoding: 'utf8' });
-        let hasError = false;
-
-        writeStream.on('error', (err) => {
-            hasError = true;
-            debug('Error writing external table log:', err);
-        });
-
-        try {
-            while (true) {
-                const lenBuf = await this._readBytes(4);
-                const len = PGUtil.readInt32(lenBuf);
-                if (len === 0) break; // EOF
-
-                const data = await this._readBytes(len);
-                if (!hasError) {
-                    writeStream.write(data);
-                }
-            }
-
-            await new Promise<void>((resolve, reject) => {
-                writeStream.end(() => {
-                    debug('External table log saved successfully:', fullPath);
-                    resolve();
-                });
-                writeStream.on('error', reject);
-            });
-        } catch (err) {
-            writeStream.destroy();
-            debug('Error saving external table log:', err);
-            throw err;
-        }
-    }
-
-    private async _handleExternalTableExportStart(): Promise<void> {
-        await this._readBytes(4);
-        await this._readBytes(10);
-        await this._readBytes(16);
-        const len = PGUtil.readInt32(await this._readBytes(4));
-        const filenameBuf = await this._readBytes(len);
-        const filename = filenameBuf.toString('utf8');
-        debug('ExternalTable Export Start. File:', filename);
-
-        try {
-            this._exportStream = fs.createWriteStream(filename);
-            this._exportStream.on('error', (err) => {
-                this._exportStream?.destroy();
-                this._exportStream = null;
-                debug('Export Stream Error:', err);
-            });
-            const buf = Buffer.alloc(4);
-            await new Promise<void>((resolve) => this._stream!.write(buf, () => resolve()));
-        } catch (e) {
-            debug('Error opening export file:', e);
-            const buf = Buffer.alloc(4);
-            PGUtil.writeInt32(buf, 1, 0);
-            this._stream!.write(buf);
-        }
-    }
-
-    private async _handleExternalTableExportData(): Promise<void> {
-        debug('Handle Export Data: Skipping 8 bytes...');
-        const skip1 = await this._readBytes(4);
-        debug('Skipped 4:', skip1.toString('hex'));
-        const skip2 = await this._readBytes(4);
-        debug('Skipped 4 (2):', skip2.toString('hex'));
-
-        await this._consumeExternalTableData(this._exportStream);
-        if (this._exportStream && !this._exportStream.closed) {
-            this._exportStream.destroy();
-        }
-        this._exportStream = null;
-    }
-
-    private async _consumeExternalTableData(writeStream: fs.WriteStream | null): Promise<void> {
-        debug('Entering Consume Loop');
-        while (true) {
-            debug('Reading status...');
-            const statusBuf = await this._readBytes(4);
-            const status = PGUtil.readInt32(statusBuf);
-            debug('ExtTab Status:', status);
-
-            if (status === ExtabSock.DATA) {
-                const numBytes = PGUtil.readInt32(await this._readBytes(4));
-                debug('Block Length:', numBytes);
-                const data = await this._readBytes(numBytes);
-                if (writeStream) {
-                    writeStream.write(data);
-                }
-            } else if (status === ExtabSock.DONE) {
-                debug('ExternalTable Data Done');
-                if (writeStream) {
-                    await new Promise<void>((resolve) => {
-                        debug('Waiting for writeStream finish...');
-                        if (writeStream.writableFinished) {
-                            debug('Stream already finished');
-                            return resolve();
-                        }
-                        const timeout = setTimeout(() => {
-                            debug('Stream finish timeout! Destroying...');
-                            writeStream.destroy();
-                            resolve();
-                        }, 5000);
-
-                        const onFinish = () => {
-                            debug('Stream finished event');
-                            clearTimeout(timeout);
-                            cleanup();
-                            resolve();
-                        };
-                        const onError = (err: Error) => {
-                            debug('Stream error on end:', err);
-                            clearTimeout(timeout);
-                            cleanup();
-                            resolve();
-                        };
-                        const cleanup = () => {
-                            writeStream.removeListener('finish', onFinish);
-                            writeStream.removeListener('error', onError);
-                        };
-                        writeStream.on('finish', onFinish);
-                        writeStream.on('error', onError);
-                        writeStream.end();
-                    });
-                }
-                return;
-            } else if (status === ExtabSock.ERROR) {
-                const len = PGUtil.readInt16(await this._readBytes(2));
-                const msg = (await this._readBytes(len)).toString('utf8');
-                debug('ExternalTable Data Error:', msg);
-                if (writeStream) writeStream.end();
-                return;
-            } else {
-                debug('Unknown ExtTab Status:', status);
-                if (writeStream) writeStream.end();
-                return;
-            }
-        }
-    }
-
-    private async _handleExternalTableImport(): Promise<void> {
-        await this._readBytes(8);
-
-        const filenameBuf: number[] = [];
-        let b = (await this._readBytes(1))[0];
-        filenameBuf.push(b);
-        while (b !== 0) {
-            b = (await this._readBytes(1))[0];
-            if (b !== 0) filenameBuf.push(b);
-        }
-        const filename = Buffer.from(filenameBuf).toString('utf8');
-        debug('ExternalTable Import Start. File:', filename);
-
-        const hostVersion = PGUtil.readInt32(await this._readBytes(4));
-        debug('Host Version:', hostVersion);
-        const clientVerBuf = Buffer.alloc(4);
-        PGUtil.writeInt32(clientVerBuf, 1, 0);
-        await new Promise<void>((resolve) => this._stream!.write(clientVerBuf, () => resolve()));
-        debug('Sent Client Version');
-
-        const format = PGUtil.readInt32(await this._readBytes(4));
-        const bufSize = PGUtil.readInt32(await this._readBytes(4));
-
-        debug('ExtTab Import Config:', { hostVersion, format, bufSize });
-
-        if (NzConnection._streamRegistry.has(filename)) {
-            debug('Using virtual import stream for:', filename);
-        } else if (!fs.existsSync(filename)) {
-            debug('Import file not found:', filename);
-            const errBuf = Buffer.alloc(4);
-            PGUtil.writeInt32(errBuf, ExtabSock.ERROR, 0);
-            this._stream!.write(errBuf);
-            return;
-        }
-
-        // Get file size for progress tracking (approximate for stream if available)
-        let totalSize = 0;
-        let readStream: Readable;
-
-        if (NzConnection._streamRegistry.has(filename)) {
-            readStream = NzConnection._streamRegistry.get(filename)!;
-            totalSize = (readStream as Readable & { byteLength?: number }).byteLength || 0;
-        } else {
-            const fileStats = fs.statSync(filename);
-            totalSize = fileStats.size;
-            readStream = fs.createReadStream(filename, { highWaterMark: bufSize || 65536 });
-        }
-
-        let bytesSent = 0;
-
-        await new Promise<void>((resolve, reject) => {
-            readStream.on('data', (chunk: string | Buffer) => {
-                const chunkBuf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-                const header = Buffer.alloc(8);
-                PGUtil.writeInt32(header, ExtabSock.DATA, 0);
-                PGUtil.writeInt32(header, chunkBuf.length, 4);
-
-                // Handle backpressure: pause readStream if TCP buffer is full
-                const canContinue1 = this._stream!.write(header);
-                const canContinue2 = this._stream!.write(chunkBuf);
-
-                if (!canContinue1 || !canContinue2) {
-                    readStream.pause();
-                    this._stream!.once('drain', () => {
-                        readStream.resume();
-                    });
-                }
-
-                // Emit progress event
-                bytesSent += chunkBuf.length;
-                this.emit('importProgress', {
-                    bytesSent,
-                    totalSize,
-                    percentComplete: totalSize > 0 ? Math.round((bytesSent / totalSize) * 100) : 0,
-                });
-            });
-
-            readStream.on('end', () => {
-                debug('Import Stream End');
-                const doneBuf = Buffer.alloc(4);
-                PGUtil.writeInt32(doneBuf, ExtabSock.DONE, 0);
-                this._stream!.write(doneBuf);
-                resolve();
-            });
-
-            readStream.on('error', (err) => {
-                debug('Import Stream Error:', err);
-                const errBuf = Buffer.alloc(4);
-                PGUtil.writeInt32(errBuf, ExtabSock.ERROR, 0);
-                this._stream!.write(errBuf);
-                const msg = err.message || 'Error';
-                const lenBuf = Buffer.alloc(2);
-                lenBuf.writeInt16BE(msg.length);
-                this._stream!.write(lenBuf);
-                this._stream!.write(Buffer.from(msg, 'utf8'));
-                reject(err);
-            });
-        });
     }
 
     private _parseRowDescription(data: Buffer, command: NzCommand): void {
@@ -1421,7 +1305,7 @@ class NzConnection extends EventEmitter {
             TypeConversions.createTextBufferParser(column.typeOid, column.typeMod)
         );
 
-        if (command) command._preparedStatement = { description: this._rowDescription };
+        if (command) command._cachedRowDescription = { description: this._rowDescription };
     }
 
     private _parseDataRow(data: Buffer): unknown[] {
@@ -1576,7 +1460,7 @@ class NzConnection extends EventEmitter {
             if (payloadEnd > this._intBufEnd) break;
 
             const rowLen = this._intBuf.readInt32BE(payloadStart + 4);
-            if (rowLen <= 0 || (8 + rowLen) !== msgLen) break;
+            if (rowLen <= 0 || 8 + rowLen !== msgLen) break;
 
             // In-place parse without subarray
             const dataStart = payloadStart + 8;
@@ -1672,7 +1556,13 @@ class NzConnection extends EventEmitter {
         return this._parseFieldByTypeInPlace(fieldData, 0, fldType, fldLen, fieldIdx);
     }
 
-    private _parseFieldByTypeInPlace(buffer: Buffer, offset: number, fldType: number, fldLen: number, fieldIdx: number): unknown {
+    private _parseFieldByTypeInPlace(
+        buffer: Buffer,
+        offset: number,
+        fldType: number,
+        fldLen: number,
+        fieldIdx: number
+    ): unknown {
         switch (fldType) {
             case NzType.NzTypeChar:
                 return buffer.toString('latin1', offset, offset + fldLen).trimEnd();

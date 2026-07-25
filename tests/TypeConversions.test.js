@@ -1,4 +1,4 @@
-const { createTextValueParser, parseTextValue, getCsNumeric } = require('../dist/types/TypeConversions');
+const { createTextValueParser, parseTextValue, getCsNumeric } = require('../dist/cjs/types/TypeConversions');
 
 const MAX_NUMERIC_DIGIT_COUNT = 4;
 const NUMERIC_MAX_PRECISION = 38;

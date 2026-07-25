@@ -1,5 +1,6 @@
 import type { NzCommand } from './NzCommand';
 import type { TimeValue } from './types/TypeConversions';
+import { NzDatabaseError } from './errors/NzDatabaseError';
 
 /**
  * Column description from the database
@@ -52,6 +53,7 @@ interface GeneratorItem {
     columns?: ColumnDescription[];
     desc?: { fieldNullAllowed: boolean[] };
     message?: string;
+    error?: NzDatabaseError;
 }
 
 // Postgres/Netezza OIDs
@@ -380,7 +382,13 @@ class NzDataReader {
             typeModifier: col.typeMod,
             typeLength: col.typeLen,
             typeName,
-            declaredTypeName: this._formatDeclaredTypeName(oid, typeName, declaredLength, numericPrecision, numericScale),
+            declaredTypeName: this._formatDeclaredTypeName(
+                oid,
+                typeName,
+                declaredLength,
+                numericPrecision,
+                numericScale
+            ),
             declaredLength,
             numericPrecision,
             numericScale,
@@ -452,7 +460,7 @@ class NzDataReader {
             }
 
             if (val.type === 'RowDescriptionStandard') {
-                const ps = this.command._preparedStatement;
+                const ps = this.command._cachedRowDescription;
                 if (this.columnDescriptions.length === 0 && ps && ps.description) {
                     this._setColumnState(ps.description, val.desc?.fieldNullAllowed ?? null);
                 } else {
@@ -478,7 +486,9 @@ class NzDataReader {
             }
 
             if (val.type === 'ErrorResponse') {
-                throw new Error(val.message || 'Unknown Netezza Error');
+                throw val.error instanceof NzDatabaseError
+                    ? val.error
+                    : new NzDatabaseError({ message: val.message || 'Unknown Netezza Error', raw: val.message || '' });
             }
 
             if (val.type === 'ReadyForQuery') {
@@ -575,7 +585,7 @@ class NzDataReader {
             }
 
             if (val.type === 'RowDescriptionStandard') {
-                const ps = this.command._preparedStatement;
+                const ps = this.command._cachedRowDescription;
                 this._pendingColumns = ps && ps.description ? ps.description : this.columnDescriptions;
                 this._pendingNullability = this._cloneNullability(val.desc?.fieldNullAllowed ?? null);
                 this.currentRow = null;
@@ -593,7 +603,9 @@ class NzDataReader {
             }
 
             if (val.type === 'ErrorResponse') {
-                throw new Error(val.message || 'Unknown Netezza Error');
+                throw val.error instanceof NzDatabaseError
+                    ? val.error
+                    : new NzDatabaseError({ message: val.message || 'Unknown Netezza Error', raw: val.message || '' });
             }
 
             if (val.type === 'ReadyForQuery') {
@@ -762,6 +774,10 @@ class NzDataReader {
                 this.releaseCallback = null;
             }
         }
+    }
+
+    async [Symbol.asyncDispose](): Promise<void> {
+        return this.close();
     }
 
     get isClosed(): boolean {

@@ -1,16 +1,17 @@
-const { NzPool } = require('../dist/NzPool');
+const { NzPool } = require('../dist/cjs/NzPool');
 
-const config = {
-    host: '192.168.0.144',
-    port: 5480,
-    database: 'JUST_DATA',
-    user: 'admin',
-    password: process.env.NZ_DEV_PASSWORD || 'password',
-    max: 2,
-    idleTimeoutMillis: 5000
-};
+const { getNzConfig } = require('./helpers/env');
+const config = (() => {
+    try {
+        return getNzConfig({ max: 2, idleTimeoutMillis: 5000 });
+    } catch (e) {
+        return null;
+    }
+})();
+const describeNz = config ? describe : describe.skip;
 
-describe('NzPool Tests', () => {
+
+describeNz('NzPool Tests', () => {
     let pool;
 
     beforeEach(() => {
@@ -28,14 +29,11 @@ describe('NzPool Tests', () => {
         const result = await pool.executeNonQuery('SELECT 1');
         expect(result.rowsAffected).toBeDefined();
 
-        // Test query
-        const reader = await pool.query('SELECT 12345 AS val');
-        try {
-            await reader.read();
-            expect(reader.getValue(0)).toBe(12345);
-        } finally {
-            await reader.close();
-        }
+        // Test query — returns buffered QueryResult and auto-releases
+        const queryResult = await pool.query('SELECT 12345 AS val');
+        expect(queryResult.rowCount).toBe(1);
+        const row = queryResult.rows[0];
+        expect(row.val ?? row.VAL).toBe(12345);
 
         expect(pool.totalCount).toBe(1);
         expect(pool.idleCount).toBe(1);

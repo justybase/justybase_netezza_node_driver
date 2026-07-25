@@ -3,20 +3,17 @@
  * Comprehensive tests that require database connection and may take longer
  */
 
-const { NzConnection } = require('../dist/NzConnection');
+const { NzConnection } = require('../dist/cjs/NzConnection');
 
-const config = {
-    host: '192.168.0.144',
-    port: 5480,
-    database: 'JUST_DATA',
-    user: 'admin',
-    password: process.env.NZ_DEV_PASSWORD || 'password'
-};
+const { getNzConfig } = require('./helpers/env');
+const config = (() => { try { return getNzConfig(); } catch (e) { return null; } })();
+const describeNz = config ? describe : describe.skip;
+
 
 const TEST_TABLE = 'JUST_DATA.ADMIN.DIMDATE';
 const TEST_TABLE2 = 'JUST_DATA.ADMIN.DIMACCOUNT';
 
-describe('Additional Full Tests - Large Data Operations', () => {
+describeNz('Additional Full Tests - Large Data Operations', () => {
     let conn;
 
     beforeEach(async () => {
@@ -69,7 +66,7 @@ describe('Additional Full Tests - Large Data Operations', () => {
     });
 });
 
-describe('Additional Full Tests - Complex Queries', () => {
+describeNz('Additional Full Tests - Complex Queries', () => {
     let conn;
 
     beforeEach(async () => {
@@ -208,7 +205,7 @@ describe('Additional Full Tests - Complex Queries', () => {
     });
 });
 
-describe('Additional Full Tests - Data Types Deep Dive', () => {
+describeNz('Additional Full Tests - Data Types Deep Dive', () => {
     let conn;
 
     beforeEach(async () => {
@@ -270,7 +267,7 @@ describe('Additional Full Tests - Data Types Deep Dive', () => {
     });
 });
 
-describe('Additional Full Tests - Connection Resilience', () => {
+describeNz('Additional Full Tests - Connection Resilience', () => {
     test('Multiple connections sequentially', async () => {
         for (let i = 0; i < 3; i++) {
             const conn = new NzConnection(config);
@@ -321,7 +318,7 @@ describe('Additional Full Tests - Connection Resilience', () => {
     });
 });
 
-describe('Additional Full Tests - Multiple Result Sets Extended', () => {
+describeNz('Additional Full Tests - Multiple Result Sets Extended', () => {
     let conn;
 
     beforeEach(async () => {
@@ -394,7 +391,7 @@ describe('Additional Full Tests - Multiple Result Sets Extended', () => {
     });
 });
 
-describe('Additional Full Tests - Date/Time Edge Cases', () => {
+describeNz('Additional Full Tests - Date/Time Edge Cases', () => {
     let conn;
 
     beforeEach(async () => {
@@ -435,7 +432,7 @@ describe('Additional Full Tests - Date/Time Edge Cases', () => {
     });
 });
 
-describe('Additional Full Tests - Reader Methods', () => {
+describeNz('Additional Full Tests - Reader Methods', () => {
     let conn;
 
     beforeEach(async () => {
@@ -477,7 +474,7 @@ describe('Additional Full Tests - Reader Methods', () => {
     });
 });
 
-describe('Additional Full Tests - Command Properties', () => {
+describeNz('Additional Full Tests - Command Properties', () => {
     let conn;
 
     beforeEach(async () => {

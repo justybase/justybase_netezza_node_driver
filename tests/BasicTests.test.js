@@ -4,21 +4,18 @@
  * This ensures both text-based (DataRow) and binary (RowStandard) formats are tested.
  */
 
-const { NzConnection } = require('../dist/NzConnection');
+const { NzConnection } = require('../dist/cjs/NzConnection');
+
+const { getNzConfig } = require('./helpers/env');
+const config = (() => { try { return getNzConfig(); } catch (e) { return null; } })();
+const describeNz = config ? describe : describe.skip;
 
 // Configuration
-const config = {
-    host: '192.168.0.144',
-    port: 5480,
-    database: 'JUST_DATA',
-    user: 'admin',
-    password: process.env.NZ_DEV_PASSWORD || 'password'
-};
 
 // Test table that is guaranteed to exist
 const TEST_TABLE = 'JUST_DATA.ADMIN.DIMDATE';
 
-describe('NzDriver - Connection Tests', () => {
+describeNz('NzDriver - Connection Tests', () => {
     let conn;
 
     beforeEach(async () => {
@@ -35,7 +32,7 @@ describe('NzDriver - Connection Tests', () => {
     });
 });
 
-describe('NzDriver - Integer Types', () => {
+describeNz('NzDriver - Integer Types', () => {
     let conn;
 
     beforeEach(async () => {
@@ -108,7 +105,7 @@ describe('NzDriver - Integer Types', () => {
     });
 });
 
-describe('NzDriver - Float Types', () => {
+describeNz('NzDriver - Float Types', () => {
     let conn;
 
     beforeEach(async () => {
@@ -149,7 +146,7 @@ describe('NzDriver - Float Types', () => {
     });
 });
 
-describe('NzDriver - Numeric/Decimal Types', () => {
+describeNz('NzDriver - Numeric/Decimal Types', () => {
     let conn;
 
     beforeEach(async () => {
@@ -192,7 +189,7 @@ describe('NzDriver - Numeric/Decimal Types', () => {
     });
 });
 
-describe('NzDriver - String Types', () => {
+describeNz('NzDriver - String Types', () => {
     let conn;
 
     beforeEach(async () => {
@@ -247,7 +244,7 @@ describe('NzDriver - String Types', () => {
     });
 });
 
-describe('NzDriver - Boolean Type', () => {
+describeNz('NzDriver - Boolean Type', () => {
     let conn;
 
     beforeEach(async () => {
@@ -290,7 +287,7 @@ describe('NzDriver - Boolean Type', () => {
     });
 });
 
-describe('NzDriver - Date/Time Types', () => {
+describeNz('NzDriver - Date/Time Types', () => {
     let conn;
 
     beforeEach(async () => {
@@ -459,7 +456,7 @@ describe('NzDriver - Date/Time Types', () => {
     });
 });
 
-describe('NzDriver - NULL Handling', () => {
+describeNz('NzDriver - NULL Handling', () => {
     let conn;
 
     beforeEach(async () => {
@@ -500,7 +497,7 @@ describe('NzDriver - NULL Handling', () => {
     });
 });
 
-describe('NzDriver - Multiple Columns', () => {
+describeNz('NzDriver - Multiple Columns', () => {
     let conn;
 
     beforeEach(async () => {
@@ -527,7 +524,7 @@ describe('NzDriver - Multiple Columns', () => {
     });
 });
 
-describe('NzDriver - Version Check', () => {
+describeNz('NzDriver - Version Check', () => {
     let conn;
 
     beforeEach(async () => {
@@ -549,7 +546,7 @@ describe('NzDriver - Version Check', () => {
     });
 });
 
-describe('NzDriver - NzDataReader API', () => {
+describeNz('NzDriver - NzDataReader API', () => {
     let conn;
 
     beforeEach(async () => {
@@ -607,7 +604,7 @@ describe('NzDriver - NzDataReader API', () => {
     });
 });
 
-describe('NzDriver - Mixed Null Values C# Port', () => {
+describeNz('NzDriver - Mixed Null Values C# Port', () => {
     let conn;
 
     beforeEach(async () => {

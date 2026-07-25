@@ -5,17 +5,16 @@
  */
 
 const odbc = require('odbc');
-const { NzConnection } = require('../dist/NzConnection');
+const { NzConnection } = require('../dist/cjs/NzConnection');
 
-const config = {
-    host: '192.168.0.144',
-    port: 5480,
-    database: 'JUST_DATA',
-    user: 'admin',
-    password: process.env.NZ_DEV_PASSWORD || 'password'
-};
+const { getNzConfig } = require('./helpers/env');
+const config = (() => { try { return getNzConfig(); } catch (e) { return null; } })();
+const describeNz = config ? describe : describe.skip;
 
-const connectionString = `DRIVER={NetezzaSQL};SERVER=${config.host};PORT=${config.port};DATABASE=${config.database};UID=${config.user};PWD=${config.password};`;
+
+const connectionString = config
+    ? `DRIVER={NetezzaSQL};SERVER=${config.host};PORT=${config.port};DATABASE=${config.database};UID=${config.user};PWD=${config.password};`
+    : '';
 
 const isLinux = process.platform === 'linux';
 
@@ -176,7 +175,7 @@ async function compareResults(nzReader, odbcResult) {
     expect(rowIdx).toBe(odbcResult.length);
 }
 
-describe('Smoke Tests - ODBC vs JsNzDriver Comparison', () => {
+describeNz('Smoke Tests - ODBC vs JsNzDriver Comparison', () => {
     let nzConn = null;
     let odbcConn = null;
 

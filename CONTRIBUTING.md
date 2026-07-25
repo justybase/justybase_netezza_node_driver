@@ -13,7 +13,7 @@ Thank you for your interest in contributing to the Netezza Node.js Driver! This 
 
 ## Code of Conduct
 
-This project follows the [Contributor Covenant Code of Conduct](https://www.contributor-covenant.org/version/2/1/code_of_conduct/). By participating, you are expected to uphold this code. Please report unacceptable behavior to the project maintainers.
+This project follows the [Contributor Covenant Code of Conduct](CODE_OF_CONDUCT.md). By participating, you are expected to uphold this code. Please report unacceptable behavior to the project maintainers via GitHub.
 
 ## How Can I Contribute?
 
@@ -52,9 +52,9 @@ Enhancement suggestions are tracked as GitHub issues. When creating an enhanceme
 
 ### Prerequisites
 
-- Node.js 18.0.0 or higher
+- Node.js 22.0.0 or higher (CI uses 22; published package supports >=18.18.0)
 - npm 9.0.0 or higher
-- TypeScript 5.x
+- TypeScript 7.x
 
 ### Getting Started
 
@@ -76,7 +76,12 @@ Enhancement suggestions are tracked as GitHub issues. When creating an enhanceme
    npm run build
    ```
 
-5. **Run smoke tests**:
+5. **Run offline unit tests** (no Netezza required):
+   ```bash
+   npm run test:unit
+   ```
+
+6. **Run smoke tests** (requires a live Netezza server and `NZ_DEV_*` / `NZ_USE_LAB_DEFAULTS`):
    ```bash
    npm run test:smoke
    ```
@@ -97,7 +102,6 @@ src/
   types/
     TypeConversions.ts  # Type conversion utilities
   utils/
-    NzConnectionHelpers.ts
     PGUtil.ts
 tests/                  # Test files
 tools/examples/         # Example scripts
@@ -116,7 +120,7 @@ tools/examples/         # Example scripts
 
 4. **Run the test suite**:
    ```bash
-   npm run test:smoke  # Quick validation
+   npm run test:smoke  # Quick validation (requires live Netezza)
    npm run test:full   # Comprehensive tests (requires Netezza server)
    ```
 
@@ -194,7 +198,7 @@ async open(): Promise<void> {
 
 ### Smoke Tests
 
-Quick validation tests that don't require a real Netezza server:
+Quick validation tests that **require a live Netezza server** and `NZ_DEV_PASSWORD`:
 
 ```bash
 npm run test:smoke

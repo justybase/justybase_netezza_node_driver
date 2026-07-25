@@ -4,15 +4,12 @@
  * where an unread CURRENT_SID reply remains on the wire before the next command.
  */
 
-const { NzConnection } = require('../dist/NzConnection');
+const { NzConnection } = require('../dist/cjs/NzConnection');
 
-const config = {
-    host: process.env.NZ_DEV_HOST || '192.168.0.144',
-    port: parseInt(process.env.NZ_DEV_PORT || '5480', 10),
-    database: process.env.NZ_DEV_DATABASE || 'JUST_DATA',
-    user: process.env.NZ_DEV_USER || 'admin',
-    password: process.env.NZ_DEV_PASSWORD || 'password',
-};
+const { getNzConfig } = require('./helpers/env');
+const config = (() => { try { return getNzConfig(); } catch (e) { return null; } })();
+const describeNz = config ? describe : describe.skip;
+
 
 const PROC_NAME = 'JUST_DATA.ADMIN.JS_PROTOCOL_SYNC_TEST';
 const CALL_SQL = `CALL ${PROC_NAME}();`;
@@ -56,7 +53,7 @@ async function captureSid(conn) {
     return sid;
 }
 
-describe('Protocol sync - CURRENT_SID vs CALL', () => {
+describeNz('Protocol sync - CURRENT_SID vs CALL', () => {
     let conn;
 
     beforeAll(async () => {

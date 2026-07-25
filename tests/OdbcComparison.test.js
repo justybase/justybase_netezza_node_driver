@@ -1,16 +1,15 @@
 
 const odbc = require('odbc');
-const { NzConnection } = require('../dist/NzConnection');
+const { NzConnection } = require('../dist/cjs/NzConnection');
 
-const config = {
-    host: '192.168.0.144',
-    port: 5480,
-    database: 'JUST_DATA',
-    user: 'admin',
-    password: process.env.NZ_DEV_PASSWORD || 'password'
-};
+const { getNzConfig } = require('./helpers/env');
+const config = (() => { try { return getNzConfig(); } catch (e) { return null; } })();
+const describeNz = config ? describe : describe.skip;
 
-const connectionString = `DRIVER={NetezzaSQL};SERVER=${config.host};PORT=${config.port};DATABASE=${config.database};UID=${config.user};PWD=${config.password};`;
+
+const connectionString = config
+    ? `DRIVER={NetezzaSQL};SERVER=${config.host};PORT=${config.port};DATABASE=${config.database};UID=${config.user};PWD=${config.password};`
+    : '';
 
 const isLinux = process.platform === 'linux';
 
@@ -1118,7 +1117,7 @@ function shouldSkipOnLinux(query) {
     return knownFailing.some(t => upper.includes(t));
 }
 
-describe('ODBC vs JsNzDriver Consistency Tests - standard', () => {
+describeNz('ODBC vs JsNzDriver Consistency Tests - standard', () => {
     const { getConnections } = createConnectionHooks();
 
     const filteredQueries = queries.filter(q => !shouldSkipOnLinux(q));
@@ -1130,7 +1129,7 @@ describe('ODBC vs JsNzDriver Consistency Tests - standard', () => {
     );
 });
 
-describe('ODBC vs JsNzDriver Consistency Tests - system', () => {
+describeNz('ODBC vs JsNzDriver Consistency Tests - system', () => {
     const { getConnections } = createConnectionHooks();
 
     const filteredSystemQueries = systemQueries.filter(q => !shouldSkipOnLinux(q));
@@ -1180,7 +1179,7 @@ function getTypeName(val) {
     return t.charAt(0).toUpperCase() + t.slice(1);
 }
 
-describe('Expected Interval/Time Values', () => {
+describeNz('Expected Interval/Time Values', () => {
     let nzConn;
 
     beforeAll(async () => {

@@ -3,7 +3,7 @@
  * Port of C# DbosTupleDesc.cs
  */
 
-interface PreparedStatement {
+interface CachedRowDescription {
     description?: Array<{ typeOid: number }>;
 }
 
@@ -55,9 +55,9 @@ class DbosTupleDesc {
     /**
      * Parse tuple description from binary data
      * @param data - raw data from backend
-     * @param preparedStatement - prepared statement with description
+     * @param cachedRowDescription - optional cached textual column metadata
      */
-    parse(data: Buffer, preparedStatement?: PreparedStatement): void {
+    parse(data: Buffer, cachedRowDescription?: CachedRowDescription): void {
         this.clear();
 
         let idx = 0;
@@ -88,7 +88,7 @@ class DbosTupleDesc {
 
             // Fix for abstime type (OID 702) being returned as int
             // https://github.com/IBM/nzpy/issues/61
-            if (ft === NzTypeInt && preparedStatement?.description?.[ix]?.typeOid === 702) {
+            if (ft === NzTypeInt && cachedRowDescription?.description?.[ix]?.typeOid === 702) {
                 ft = NzTypeIntvsAbsTimeFIX;
             }
 

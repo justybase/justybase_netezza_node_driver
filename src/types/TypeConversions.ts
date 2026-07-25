@@ -159,7 +159,10 @@ function parseIntFromBuffer(data: Buffer, offset: number, len: number): number {
     let neg = false;
     let i = offset;
     const end = offset + len;
-    if (i < end && data[i] === 45) { neg = true; i++; }
+    if (i < end && data[i] === 45) {
+        neg = true;
+        i++;
+    }
     while (i < end) {
         val = val * 10 + (data[i] - 48);
         i++;
@@ -172,7 +175,10 @@ function parseBigIntFromBuffer(data: Buffer, offset: number, len: number): bigin
     let neg = false;
     let i = offset;
     const end = offset + len;
-    if (i < end && data[i] === 45) { neg = true; i++; }
+    if (i < end && data[i] === 45) {
+        neg = true;
+        i++;
+    }
     while (i < end) {
         val = val * 10n + BigInt(data[i] - 48);
         i++;
@@ -265,7 +271,9 @@ function normalizeTimestampText(value: string): string | null {
         return `${trimmed}T00:00:00.000Z`;
     }
 
-    const match = trimmed.match(/^([0-9]{4}-[0-9]{2}-[0-9]{2})[ T]([0-9]{2}:[0-9]{2}:[0-9]{2})(\.[0-9]+)?(?:([+-])([0-9]{2})(?::?([0-9]{2}))?)?$/);
+    const match = trimmed.match(
+        /^([0-9]{4}-[0-9]{2}-[0-9]{2})[ T]([0-9]{2}:[0-9]{2}:[0-9]{2})(\.[0-9]+)?(?:([+-])([0-9]{2})(?::?([0-9]{2}))?)?$/
+    );
     if (!match) {
         return null;
     }
@@ -377,7 +385,13 @@ function readSignedNumericBigInt(data: Buffer, partCount: number, offset: number
  * @param scale - scale
  * @param digitCount - number of 32-bit digits
  */
-export function getCsNumeric(data: Buffer, prec: number, scale: number, digitCount: number, offset: number = 0): number | string {
+export function getCsNumeric(
+    data: Buffer,
+    prec: number,
+    scale: number,
+    digitCount: number,
+    offset: number = 0
+): number | string {
     const partCount = digitCount > 0 ? digitCount : prec <= 9 ? 1 : prec <= 18 ? 2 : 4;
 
     // Fast path: partCount <= 2 and prec <= 15 -> use Number arithmetic, no BigInt

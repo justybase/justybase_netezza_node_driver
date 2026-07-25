@@ -1,6 +1,5 @@
 import { EventEmitter } from 'events';
-import { NzConnection, NzConnectionConfig } from './NzConnection';
-import { NzDataReader } from './NzDataReader';
+import { NzConnection, NzConnectionConfig, QueryResult, ExecuteResult } from './NzConnection';
 
 const debug = require('debug')('nz:pool');
 
@@ -10,7 +9,10 @@ const debug = require('debug')('nz:pool');
 export interface NzPoolConfig extends NzConnectionConfig {
     /** Maximum number of connections in the pool (default: 10) */
     max?: number;
-    /** Minimum number of idle connections to maintain (default: 0) */
+    /**
+     * Minimum number of idle connections to maintain (default: 0).
+     * When min > 0, connections are pre-created into the idle pool after construction.
+     */
     min?: number;
     /** Milliseconds a connection can sit idle before being closed (default: 10000). Set 0 to disable. */
     idleTimeoutMillis?: number;
@@ -48,11 +50,12 @@ interface PendingItem {
  *   user: 'admin',
  *   password: 'secret',
  *   max: 10,
+ *   min: 2, // pre-creates 2 idle connections
  *   idleTimeoutMillis: 30000,
  * });
  *
- * // Simple query
- * const reader = await pool.query('SELECT * FROM my_table');
+ * // Simple query — returns rows and auto-releases the connection
+ * const { rows } = await pool.query('SELECT * FROM my_table WHERE id = $1', [42]);
  *
  * // Manual checkout
  * const { client, release } = await pool.connect();
@@ -76,6 +79,7 @@ class NzPool extends EventEmitter {
     private _ended: boolean = false;
     private _endCallback: (() => void) | undefined;
     private _useCount: WeakMap<NzConnection, number> = new WeakMap();
+    private _removing: WeakSet<NzConnection> = new WeakSet();
 
     private readonly _max: number;
     private readonly _min: number;
@@ -95,6 +99,10 @@ class NzPool extends EventEmitter {
         this._maxUses = config.maxUses ?? Infinity;
         this._maxLifetimeSeconds = config.maxLifetimeSeconds ?? 0;
         this._allowExitOnIdle = config.allowExitOnIdle ?? false;
+
+        if (this._min > 0) {
+            process.nextTick(() => this._ensureMinIdle());
+        }
     }
 
     /** Number of clients waiting in the queue for a connection */
@@ -183,26 +191,15 @@ class NzPool extends EventEmitter {
 
     /**
      * Execute a query using a connection from the pool.
-     * The connection is automatically released after the reader is closed.
+     * Returns buffered rows and automatically releases the connection.
      */
-    async query(sql: string): Promise<NzDataReader> {
+    async query(sql: string, params?: unknown[]): Promise<QueryResult> {
         const { client, release } = await this.connect();
 
         try {
-            const cmd = client.createCommand(sql);
-            const reader = await cmd.executeReader();
-
-            // Wrap the reader's close to also release the connection
-            const originalClose = reader.close.bind(reader);
-            reader.close = async () => {
-                try {
-                    await originalClose();
-                } finally {
-                    release();
-                }
-            };
-
-            return reader;
+            const result = await client.query(sql, params);
+            release();
+            return result;
         } catch (err) {
             release(err instanceof Error ? err : new Error(String(err)));
             throw err;
@@ -212,16 +209,18 @@ class NzPool extends EventEmitter {
     /**
      * Execute a non-query SQL statement (INSERT, UPDATE, DELETE, DDL).
      * The connection is automatically released after execution.
-     * @returns Number of rows affected (-1 for DDL)
+     * @returns Number of rows affected (-1 for DDL) and notices
      */
-    async executeNonQuery(sql: string): Promise<{ rowsAffected: number; notices: readonly string[] }> {
+    async executeNonQuery(
+        sql: string,
+        params?: unknown[]
+    ): Promise<{ rowsAffected: number; notices: readonly string[] }> {
         const { client, release } = await this.connect();
 
         try {
-            const cmd = client.createCommand(sql);
-            const rowsAffected = await cmd.executeNonQuery();
+            const result: ExecuteResult = await client.execute(sql, params);
             release();
-            return { rowsAffected, notices: cmd.notices };
+            return { rowsAffected: result.rowCount, notices: result.notices };
         } catch (err) {
             release(err instanceof Error ? err : new Error(String(err)));
             throw err;
@@ -229,11 +228,20 @@ class NzPool extends EventEmitter {
     }
 
     /**
-     * Drain the pool and close all connections.
+     * Drain the pool and close all connections. Idempotent.
      */
     async end(): Promise<void> {
+        if (this._ended) {
+            return;
+        }
         if (this._ending) {
-            throw new Error('Called end on pool more than once');
+            return new Promise<void>((resolve) => {
+                const prev = this._endCallback;
+                this._endCallback = () => {
+                    if (prev) prev();
+                    resolve();
+                };
+            });
         }
         this._ending = true;
 
@@ -241,6 +249,57 @@ class NzPool extends EventEmitter {
             this._endCallback = resolve;
             this._pulseQueue();
         });
+    }
+
+    async [Symbol.asyncDispose](): Promise<void> {
+        return this.end();
+    }
+
+    private _ensureMinIdle(): void {
+        if (this._ending || this._ended) return;
+        while (this._clients.length < this._min && !this._isFull()) {
+            this._createIdleClient();
+        }
+    }
+
+    private _createIdleClient(): void {
+        const client = new NzConnection(this._config);
+        this._clients.push(client);
+        this._useCount.set(client, 0);
+
+        debug('pre-creating idle client for min pool size');
+
+        client
+            .connect()
+            .then(() => {
+                if (this._ending || this._ended) {
+                    this._remove(client);
+                    return;
+                }
+                this._attachClientLifecycle(client);
+                this.emit('connect', client);
+                this._idle.push({ client, timeoutId: undefined });
+                this._pulseQueue();
+            })
+            .catch((err: Error) => {
+                debug('idle warmup client failed to connect', err);
+                this._clients = this._clients.filter((c) => c !== client);
+                this._useCount.delete(client);
+                this.emit('error', err);
+            });
+    }
+
+    private _attachClientLifecycle(client: NzConnection): void {
+        const onDead = () => {
+            if (this._removing.has(client)) return;
+            if (!this._clients.includes(client)) return;
+            this._remove(client, () => {
+                this._ensureMinIdle();
+                this._pulseQueue();
+            });
+        };
+        client.on('error', onDead);
+        client.on('close', onDead);
     }
 
     private _pulseQueue(): void {
@@ -307,7 +366,7 @@ class NzPool extends EventEmitter {
             tid = setTimeout(() => {
                 debug('ending client due to connection timeout');
                 timeoutHit = true;
-                client.close();
+                void client.close();
             }, this._connectionTimeoutMillis);
         }
 
@@ -315,6 +374,8 @@ class NzPool extends EventEmitter {
             .connect()
             .then(() => {
                 if (tid) clearTimeout(tid);
+
+                this._attachClientLifecycle(client);
 
                 // Set up max lifetime timer
                 if (this._maxLifetimeSeconds > 0) {
@@ -386,14 +447,20 @@ class NzPool extends EventEmitter {
             if (useCount >= this._maxUses) {
                 debug('remove expended client');
             }
-            return this._remove(client, () => this._pulseQueue());
+            return this._remove(client, () => {
+                this._ensureMinIdle();
+                this._pulseQueue();
+            });
         }
 
         // Remove expired clients
         if (this._expired.has(client)) {
             debug('remove expired client');
             this._expired.delete(client);
-            return this._remove(client, () => this._pulseQueue());
+            return this._remove(client, () => {
+                this._ensureMinIdle();
+                this._pulseQueue();
+            });
         }
 
         // Set up idle timeout
@@ -402,7 +469,10 @@ class NzPool extends EventEmitter {
             tid = setTimeout(() => {
                 if (this._isAboveMin()) {
                     debug('remove idle client');
-                    this._remove(client, () => this._pulseQueue());
+                    this._remove(client, () => {
+                        this._ensureMinIdle();
+                        this._pulseQueue();
+                    });
                 }
             }, this._idleTimeoutMillis);
 
@@ -416,6 +486,12 @@ class NzPool extends EventEmitter {
     }
 
     private _remove(client: NzConnection, callback?: () => void): void {
+        if (this._removing.has(client) || !this._clients.includes(client)) {
+            if (callback) callback();
+            return;
+        }
+        this._removing.add(client);
+
         // Remove from idle list
         const idleIdx = this._idle.findIndex((item) => item.client === client);
         if (idleIdx !== -1) {
@@ -428,11 +504,9 @@ class NzPool extends EventEmitter {
         this._useCount.delete(client);
 
         // Close the connection
-        try {
-            client.close();
-        } catch {
+        void client.close().catch(() => {
             // Ignore close errors
-        }
+        });
 
         this.emit('remove', client);
         if (callback) callback();

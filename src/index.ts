@@ -1,6 +1,10 @@
 export { NzConnection, NzConnectionConfig } from './NzConnection';
+export type { QueryResult, ExecuteResult } from './NzConnection';
 export { NzCommand } from './NzCommand';
 export { NzDataReader, type ColumnDescription, type ColumnMetadata, type GeneratorItem } from './NzDataReader';
 export { NzPool } from './NzPool';
 export type { NzPoolConfig } from './NzPool';
 export type { TimeValue } from './types/TypeConversions';
+export { NzDatabaseError, createNzDatabaseError, parseBackendErrorFields } from './errors/NzDatabaseError';
+export { parseConnectionString } from './connectionString';
+export { escapeLiteral, substituteParameters } from './protocol/sqlParameters';

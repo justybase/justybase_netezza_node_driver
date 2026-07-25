@@ -1,22 +1,19 @@
-const { NzConnection } = require('../dist/NzConnection');
+const { NzConnection } = require('../dist/cjs/NzConnection');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
+const { getNzConfig } = require('./helpers/env');
+const config = (() => { try { return getNzConfig(); } catch (e) { return null; } })();
+const describeNz = config ? describe : describe.skip;
+
 // Configuration
-const config = {
-    host: '192.168.0.144',
-    port: 5480,
-    database: 'JUST_DATA',
-    user: 'admin',
-    password: process.env.NZ_DEV_PASSWORD || 'password'
-};
 
 const CERT_PATH = process.env.NZ_SSL_CERT_PATH || null;
 const hasValidCert = !!(CERT_PATH && fs.existsSync(CERT_PATH));
 const testWithValidCert = hasValidCert ? test : test.skip;
 
-describe('NzDriver - SSL Tests', () => {
+describeNz('NzDriver - SSL Tests', () => {
 
     testWithValidCert('BasicTests - Valid Cert Connects and Queries', async () => {
         const sslConfig = {

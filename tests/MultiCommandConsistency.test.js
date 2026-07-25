@@ -1,12 +1,9 @@
-const { NzConnection } = require('../dist/NzConnection');
+const { NzConnection } = require('../dist/cjs/NzConnection');
 
-const config = {
-    host: '192.168.0.144',
-    port: 5480,
-    database: 'JUST_DATA',
-    user: 'admin',
-    password: process.env.NZ_DEV_PASSWORD || 'password'
-};
+const { getNzConfig } = require('./helpers/env');
+const config = (() => { try { return getNzConfig(); } catch (e) { return null; } })();
+const describeNz = config ? describe : describe.skip;
+
 
 const SQL1 = 'SELECT * FROM JUST_DATA..DIMDATE ORDER BY DATEKEY LIMIT 10';
 const SQL2 = 'SELECT * FROM JUST_DATA..DIMACCOUNT ORDER BY ACCOUNTKEY LIMIT 10';
@@ -36,7 +33,7 @@ function normalizeRows(rows) {
     return rows.map(row => row.map(normalizeValue));
 }
 
-describe('NzDriver - Multi-Command Consistency', () => {
+describeNz('NzDriver - Multi-Command Consistency', () => {
 
     test('Results should be identical: two connections vs one connection two commands vs one command multi-statement', async () => {
         // Approach 1: Two separate connections, each with its own command

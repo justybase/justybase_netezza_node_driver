@@ -6,8 +6,11 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { PGUtil } from './utils/PGUtil';
 import { BackendMessageCode, HandshakeCode, ProtocolVersion } from './protocol/constants';
+import { createNzDatabaseError, NzDatabaseError } from './errors/NzDatabaseError';
+import { SocketTransport } from './transport/SocketTransport';
+import createDebug from 'debug';
 
-const debug = require('debug')('nz:handshake');
+const debug = createDebug('nz:handshake');
 
 interface HandshakeOptions {
     securityLevel?: 'PreferredUnsecured' | 'OnlyUnsecuredSession' | 'PreferredSecuredSession' | 'OnlySecuredSession';
@@ -28,6 +31,7 @@ class Handshake {
     private _stream: Stream;
     private _host: string;
     private _options: HandshakeOptions;
+    private _transport: SocketTransport = new SocketTransport();
 
     private _hsVersion: number = -1;
     private _protocol1: number = -1;
@@ -48,11 +52,17 @@ class Handshake {
         this._stream = stream;
         this._host = host;
         this._options = options;
+        this._transport.attach(stream);
 
         this._guardiumClientOS = process.platform;
         this._guardiumClientOSUser = options.osUser || process.env.USERNAME || process.env.USER || 'unknown';
         this._guardiumAppName = options.appName || path.basename(process.argv[1] || 'node');
         this._guardiumClientHostName = options.clientHostName || os.hostname();
+    }
+
+    private _setStream(stream: Stream): void {
+        this._stream = stream;
+        this._transport.attach(stream);
     }
 
     async startup(database: string, user: string, password: string): Promise<Stream> {
@@ -73,22 +83,14 @@ class Handshake {
             throw new Error('Error in ConnConnectionComplete');
         }
 
+        // SocketTransport may have pulled extra TCP chunks; return leftovers to the stream
+        // so NzConnection's own reader sees a continuous protocol byte stream.
+        this._transport.flushUnreadToStream();
         return this._stream;
     }
 
     async readBytes(n: number): Promise<Buffer> {
-        const chunks: Buffer[] = [];
-        let needed = n;
-        while (needed > 0) {
-            const chunk = this._stream.read(needed) as Buffer | null;
-            if (chunk !== null) {
-                chunks.push(chunk);
-                needed -= chunk.length;
-            } else {
-                await new Promise<void>((r) => this._stream.once('readable', r));
-            }
-        }
-        return chunks.length === 1 ? chunks[0] : Buffer.concat(chunks, n);
+        return this._transport.readBytes(n);
     }
 
     async readByte(): Promise<number> {
@@ -205,9 +207,11 @@ class Handshake {
             }
 
             return new Promise<boolean>((resolve, reject) => {
+                // Return any over-read plaintext bytes to the socket before TLS wraps it.
+                this._transport.flushUnreadToStream();
                 const secureSocket = tls.connect(sslOptions, () => {
                     debug('SSL Connected');
-                    this._stream = secureSocket;
+                    this._setStream(secureSocket);
                     this._stream.on('error', (err) => {
                         debug('Secure Stream Error', err);
                     });
@@ -376,7 +380,21 @@ class Handshake {
                         return true;
                 }
             } else if (beresp === BackendMessageCode.ErrorResponse) {
-                throw new Error('Handshake V2 Failed: ErrorResponse from backend');
+                try {
+                    const lenBuf = await this.readBytes(4);
+                    const len = PGUtil.readInt32(lenBuf);
+                    if (len >= 0 && len <= 100000000) {
+                        const body = await this.readBytes(Math.max(0, len - 4));
+                        throw createNzDatabaseError(body);
+                    }
+                    throw createNzDatabaseError(lenBuf);
+                } catch (e) {
+                    if (e instanceof NzDatabaseError) throw e;
+                    throw new NzDatabaseError({
+                        message: 'Handshake V2 Failed: ErrorResponse from backend',
+                        raw: 'Handshake V2 Failed: ErrorResponse from backend',
+                    });
+                }
             } else {
                 throw new Error(`Handshake V2 Failed: Unexpected response ${String.fromCharCode(beresp)}`);
             }
@@ -468,11 +486,11 @@ class Handshake {
                 if (len < 0 || len > 100000000) {
                     let msg = lenBuf.toString('utf8');
                     msg += await this.readString();
-                    throw new Error(`Backend Error: ${msg}`);
+                    throw createNzDatabaseError(msg);
                 }
 
                 const body = await this.readBytes(len - 4);
-                throw new Error(`Backend Error: ${body.toString()}`);
+                throw createNzDatabaseError(body);
             }
 
             const skipped = await this.readBytes(4);

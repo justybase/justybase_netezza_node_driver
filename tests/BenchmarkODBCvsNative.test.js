@@ -1,17 +1,16 @@
 
 const odbc = require('odbc');
-const { NzConnection, NzCommand } = require('../dist');
+const { NzConnection, NzCommand } = require('../dist/cjs');
 const crypto = require('crypto');
 
-const config = {
-    host: '192.168.0.144',
-    port: 5480,
-    database: 'JUST_DATA',
-    user: 'admin',
-    password: process.env.NZ_DEV_PASSWORD || 'password'
-};
+const { getNzConfig } = require('./helpers/env');
+const config = (() => { try { return getNzConfig(); } catch (e) { return null; } })();
+const describeNz = config ? describe : describe.skip;
 
-const connectionString = `DRIVER={NetezzaSQL};SERVER=${config.host};PORT=${config.port};DATABASE=${config.database};UID=${config.user};PWD=${config.password};`;
+
+const connectionString = config
+    ? `DRIVER={NetezzaSQL};SERVER=${config.host};PORT=${config.port};DATABASE=${config.database};UID=${config.user};PWD=${config.password};`
+    : '';
 
 const ROW_COUNT = 100000;
 
@@ -316,7 +315,7 @@ function printResults(results) {
 if (require.main === module) {
     runBenchmark().catch(console.error);
 } else {
-    describe('BenchmarkODBCvsNative', () => {
+    describeNz('BenchmarkODBCvsNative', () => {
         test.skip('manual performance benchmark', async () => {
             await runBenchmark();
         });

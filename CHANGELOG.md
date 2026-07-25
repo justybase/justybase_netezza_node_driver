@@ -5,6 +5,84 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.4.0] - 2026-07-25
+
+### Added
+- pg-style `connection.query()` / `pool.query()` returning buffered `QueryResult` (`rows`, `rowCount`, `fields`, `notices`).
+- Connection URI support via `parseConnectionString` and `new NzConnection('netezza://...')` / `nz://`.
+- Structured `NzDatabaseError` with PostgreSQL-style field parsing (`severity`, SQLSTATE `code`, detail, hint).
+- Shared SQL parameter helpers (`escapeLiteral`, `substituteParameters`) with honest client-side escaping semantics.
+- Socket transport abstraction (`SocketTransport`) for clearer I/O boundaries.
+- Offline unit tests (`npm run test:unit`) for parameters, errors, and connection strings; CI runs them on every push/PR.
+- Dual CJS + ESM package layout (`dist/cjs`, `dist/esm`) with `exports` / `module` / `sideEffects: false`.
+- Typedoc script (`npm run docs`); TypeDoc still peers on TypeScript 6.x, so the repo uses `legacy-peer-deps` (see `.npmrc`).
+- `NOTICE` included in the published package.
+- Dependabot updates for GitHub Actions; npm publish with `--provenance` and release-tag/version assertion.
+- `.env.example` and `getNzConfig` test helper (`NZ_DEV_*`, `NZ_USE_LAB_DEFAULTS`).
+
+### Changed
+- Package version **2.4.0**; Node `engines` softened to `>=18.18.0`.
+- TypeScript bumped to ^7.0.2.
+- Integration tests no longer hardcode lab host credentials; suites skip when env is missing.
+- README leads with pg-style quick start; ADO.NET API documented as a secondary streaming style.
+
+## [2.3.3] - 2026-07-24
+
+### Fixed
+- Kept TypeScript on the 6.x line for `ts-jest` peer compatibility after the 2.3.2 tooling experiment.
+
+### Changed
+- Release packaging and dependency alignment for a clean 2.3.x publish.
+- Removed `ts-jest` from the development toolchain once it was no longer required.
+
+## [2.3.2] - 2026-07-24
+
+### Changed
+- Removed ESLint from the development toolchain.
+- Attempted a TypeScript 7 bump (later reverted in 2.3.3 for peer-dependency compatibility).
+
+> Note: This version may not have published cleanly to npm; prefer 2.3.3 or later.
+
+## [2.3.1] - 2026-07-24
+
+### Fixed
+- Drain orphaned/stale backend protocol responses before starting the next query so the connection stays in sync after cancelled or interrupted work.
+
+### Changed
+- Dependency upgrades bundled with the 2.3.x maintenance line.
+
+## [2.3.0] - 2026-07-11
+
+### Changed
+- Further optimized DBOS row parsing for large result sets.
+- Dependency upgrades in `package-lock.json`.
+
+## [2.2.0] - 2026-05-23
+
+### Added
+- Parameter support on `NzCommand` / `createCommand`, including parameter substitution during query execution.
+- Cancel-operation timeout support.
+
+### Changed
+- Enhanced SSL security handling.
+- Optimized DBOS row parsing with buffer-based parsers and batch processing.
+- Refactored `TimeValue` to avoid duplicated type definitions.
+- Cross-platform debug test script improvements.
+
+### Fixed
+- Prevented stale command cancellations from disrupting later work.
+- Improved `readBytes` to accumulate partial socket reads until the required byte count is available.
+- Simplified command-number initialization and increment logic.
+
+## [2.1.0] - 2026-05-16
+
+### Added
+- Built-in connection pool (`NzPool`) with configurable limits, timeouts, and idle management.
+- Comprehensive pool and notice-handling tests.
+
+### Changed
+- Updated development dependencies.
+
 ## [2.0.0] - 2026-04-03
 
 ### Breaking Changes
@@ -32,40 +110,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added public metadata helpers on `NzDataReader`: `getProviderType()`, `getTypeModifier()`, `getTypeLength()`, `getDeclaredTypeName()`, and `getColumnMetadata()`.
 - Added live smoke/full coverage for `VARCHAR`, `NVARCHAR`, `NCHAR`, `NATIONAL CHARACTER VARYING`, `CURRENT_DATE`, and `CURRENT_TIMESTAMP` metadata.
 - Added live smoke coverage for `BYTEINT`, `_V_TABLE.OBJID` (`OID`), and `_V_TABLE.CREATEDATE` (`ABSTIME`) metadata.
-
-## [1.0.1] - 2026-02-14
-
-### Changed
-- Version bump to 1.0.1 for release
-
-## [1.0.0] - 2025-02-14
-
-### Added
-- Initial release of `@justybase/netezza-driver`
-- Native TypeScript driver for IBM Netezza / PureData System for Analytics
-- Direct connection to Netezza databases without ODBC drivers or external dependencies
-- ADO.NET-style API with Connection/Command/Reader pattern
-- SSL/TLS support for encrypted connections
-- Full TypeScript type definitions and declarations
-- High-performance buffer pooling for large result sets
-- Support for all Netezza data types with proper type conversions
-- Query cancellation support
-- External table operations (import/export)
-- Transaction handling
-- Connection timeout configuration
-- Comprehensive test suite (smoke tests + full tests)
-- GitHub Actions CI/CD pipeline
-- Apache 2.0 license
-
-### Technical Details
-- Pure TypeScript implementation with no native bindings
-- Compatible with Node.js 18.0.0 and above
-- Supports CommonJS module format
-- Includes debug logging support via `debug` package
-
-[1.0.1]: https://github.com/KrzysztofDusko/netezza-driver/releases/tag/v1.0.1
-[1.0.0]: https://github.com/KrzysztofDusko/netezza-driver/releases/tag/v1.0.0
-[2.0.0]: https://github.com/KrzysztofDusko/netezza-driver/releases/tag/v2.0.0
 
 ## [1.1.0] - 2026-02-16
 
@@ -105,4 +149,43 @@ const str = reader.getString(0); // Recommended
 - Fixed command/reader return types, timeout handling, and error typing for safer runtime behavior.
 - Added/updated tests in `tests/ExternalTableTests.test.js` covering external table logging and `.nzbad` import scenarios.
 
-[1.1.0]: https://github.com/KrzysztofDusko/netezza-driver/releases/tag/v1.1.0
+## [1.0.1] - 2026-02-14
+
+### Changed
+- Version bump to 1.0.1 for release
+
+## [1.0.0] - 2025-02-14
+
+### Added
+- Initial release of `@justybase/netezza-driver`
+- Native TypeScript driver for IBM Netezza / PureData System for Analytics
+- Direct connection to Netezza databases without ODBC drivers or external dependencies
+- ADO.NET-style API with Connection/Command/Reader pattern
+- SSL/TLS support for encrypted connections
+- Full TypeScript type definitions and declarations
+- High-performance buffer pooling for large result sets
+- Support for all Netezza data types with proper type conversions
+- Query cancellation support
+- External table operations (import/export)
+- Transaction handling
+- Connection timeout configuration
+- Comprehensive test suite (smoke tests + full tests)
+- GitHub Actions CI/CD pipeline
+- Apache 2.0 license
+
+### Technical Details
+- Pure TypeScript implementation with no native bindings
+- Compatible with Node.js 18.0.0 and above
+- Supports CommonJS module format
+- Includes debug logging support via `debug` package
+
+[2.3.3]: https://github.com/justybase/justybase_netezza_node_driver/compare/2.3.2...2.3.3
+[2.3.2]: https://github.com/justybase/justybase_netezza_node_driver/compare/2.3.1...2.3.2
+[2.3.1]: https://github.com/justybase/justybase_netezza_node_driver/compare/2.3.0...2.3.1
+[2.3.0]: https://github.com/justybase/justybase_netezza_node_driver/compare/2.2.0...2.3.0
+[2.2.0]: https://github.com/justybase/justybase_netezza_node_driver/compare/2.1.0...2.2.0
+[2.1.0]: https://github.com/justybase/justybase_netezza_node_driver/compare/2.0.0...2.1.0
+[2.0.0]: https://github.com/justybase/justybase_netezza_node_driver/compare/1.1.0...2.0.0
+[1.1.0]: https://github.com/justybase/justybase_netezza_node_driver/compare/1.0.1...1.1.0
+[1.0.1]: https://github.com/justybase/justybase_netezza_node_driver/compare/1.0.0...1.0.1
+[1.0.0]: https://github.com/justybase/justybase_netezza_node_driver/releases/tag/1.0.0

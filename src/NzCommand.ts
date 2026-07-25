@@ -2,13 +2,14 @@
 import { NzDataReader } from './NzDataReader';
 
 interface NzConnection {
-    execute(command: NzCommand, bufferOnly: boolean): Promise<boolean>;
+    execute(command: NzCommand, bufferOnly?: boolean): Promise<boolean>;
     executeReader(command: NzCommand): Promise<NzDataReader>;
     cancel(): Promise<void>;
     commandTimeout?: number;
 }
 
-interface PreparedStatement {
+/** Cached textual row description from a prior RowDescription message (not a server prepared statement). */
+interface CachedRowDescription {
     description?: ColumnInfo[];
 }
 
@@ -29,7 +30,8 @@ class NzCommand {
     parameters: unknown[];
     _recordsAffected: number;
     commandTimeout: number;
-    _preparedStatement?: PreparedStatement;
+    /** Cached column metadata from the last RowDescription (client-side cache only). */
+    _cachedRowDescription?: CachedRowDescription;
     /** Server notices/warnings collected during the last execution */
     _notices: string[] = [];
 
@@ -67,9 +69,12 @@ class NzCommand {
     }
 
     /**
-     * Set parameters for parameterized queries.
-     * Parameters are referenced as $1, $2, ... in the command text.
-     * Values are automatically escaped to prevent SQL injection.
+     * Set parameters for client-side placeholder substitution ($1, $2, ...).
+     *
+     * Values are escaped and interpolated into the SQL text before send.
+     * This is NOT server-side prepared/bind parameters. Escaping reduces common
+     * injection risks for supported primitive types, but is not a guarantee
+     * against all injection if values or SQL are misused.
      *
      * @example
      * ```typescript
@@ -84,7 +89,7 @@ class NzCommand {
     }
 
     /**
-     * Add a single parameter value.
+     * Add a single parameter value (client-side escaped interpolation; see setParameters).
      */
     addParameter(value: unknown): this {
         this.parameters.push(value);

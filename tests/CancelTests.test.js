@@ -1,13 +1,10 @@
 
-const { NzConnection } = require('../dist/NzConnection');
+const { NzConnection } = require('../dist/cjs/NzConnection');
 
-const config = {
-    host: '192.168.0.144',
-    port: 5480,
-    database: 'JUST_DATA',
-    user: 'admin',
-    password: process.env.NZ_DEV_PASSWORD || 'password'
-};
+const { getNzConfig } = require('./helpers/env');
+const config = (() => { try { return getNzConfig(); } catch (e) { return null; } })();
+const describeNz = config ? describe : describe.skip;
+
 
 const HEAVY_SQL = `
         SELECT     
@@ -61,7 +58,7 @@ async function readRows(reader, expectedRows) {
     return rowsRead;
 }
 
-describe('NzDriver - Query Cancellation', () => {
+describeNz('NzDriver - Query Cancellation', () => {
     let conn;
 
     beforeAll(async () => {
