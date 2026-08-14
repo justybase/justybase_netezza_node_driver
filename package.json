@@ -60,7 +60,7 @@
   },
   "devDependencies": {
     "@types/debug": "^4.1.13",
-    "@types/node": "^26.1.1",
+    "@types/node": "^26.2.0",
     "cross-env": "^10.1.0",
     "jest": "^30.4.2",
     "mitata": "^1.0.34",
