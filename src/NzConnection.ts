@@ -205,6 +205,18 @@ class NzConnection extends EventEmitter {
     commandTimeout: number = 30;
     connectionTimeout: number = 10; // Default 10 seconds for connection timeout
     private _executing: boolean = false;
+    /**
+     * The promise for an in-flight execute operation whose protocol response
+     * is still being consumed (the whole execution for execute(); only the
+     * startup phase for executeReader()). A timeout deliberately rejects the
+     * public promise before this operation has finished, so close() must keep
+     * the stream alive until it settles.
+     *
+     * Note: once a reader has been handed to the caller, this is cleared while
+     * rows are still being streamed — close() does not wait for an active
+     * reader, it just closes the socket so the pending read rejects.
+     */
+    private _activeExecution: Promise<unknown> | null = null;
     private _exportStream: WriteStream | null = null;
     private readonly _external: ExternalTableHandler;
 
@@ -419,6 +431,7 @@ class NzConnection extends EventEmitter {
             return;
         }
         if (!this._socket || this._socket.destroyed) {
+            await this._waitForActiveExecution();
             this._connected = false;
             this._socket = null;
             this._stream = null;
@@ -452,9 +465,33 @@ class NzConnection extends EventEmitter {
             }
         });
 
+        // A timed-out executeReader() may still be unwinding its async
+        // generator after the socket close event. Do not clear _stream until
+        // that cleanup has completed.
+        await this._waitForActiveExecution();
         this._socket = null;
         this._stream = null;
         this._closing = false;
+    }
+
+    private async _waitForActiveExecution(): Promise<void> {
+        const activeExecution = this._activeExecution;
+        if (activeExecution) {
+            await activeExecution.catch(() => undefined);
+        }
+    }
+
+    private _trackExecution<T>(execution: Promise<T>): Promise<T> {
+        this._activeExecution = execution;
+        execution.then(
+            () => {
+                if (this._activeExecution === execution) this._activeExecution = null;
+            },
+            () => {
+                if (this._activeExecution === execution) this._activeExecution = null;
+            }
+        );
+        return execution;
     }
 
     async [Symbol.asyncDispose](): Promise<void> {
@@ -555,6 +592,7 @@ class NzConnection extends EventEmitter {
     private async _readBytesSlow(n: number): Promise<Buffer> {
         this._diag.readBytesSlowCalls = (this._diag.readBytesSlowCalls || 0) + 1;
         this._diag.readBytesSlowBytes = (this._diag.readBytesSlowBytes || 0) + n;
+        const stream = this._assertReadableStream();
         if (n > this._intBuf.length) {
             const chunks: Buffer[] = [];
             const available = this._intBufEnd - this._intBufStart;
@@ -566,7 +604,7 @@ class NzConnection extends EventEmitter {
 
             let remaining = n - available;
             while (remaining > 0) {
-                const chunk = this._stream!.read() as Buffer | null;
+                const chunk = stream.read() as Buffer | null;
                 if (chunk !== null) {
                     if (chunk.length <= remaining) {
                         chunks.push(chunk);
@@ -588,7 +626,7 @@ class NzConnection extends EventEmitter {
         }
 
         while (this._intBufEnd - this._intBufStart < n) {
-            const chunk = this._stream!.read() as Buffer | null;
+            const chunk = stream.read() as Buffer | null;
             if (chunk !== null) {
                 const space = this._intBuf.length - this._intBufEnd;
                 if (chunk.length <= space) {
@@ -597,7 +635,7 @@ class NzConnection extends EventEmitter {
                 } else {
                     chunk.copy(this._intBuf, this._intBufEnd, 0, space);
                     this._intBufEnd += space;
-                    this._stream!.unshift(chunk.slice(space));
+                    stream.unshift(chunk.slice(space));
                 }
             } else {
                 await this._waitForReadable();
@@ -610,13 +648,19 @@ class NzConnection extends EventEmitter {
     }
 
     private async _waitForReadable(): Promise<void> {
-        if (!this._socket || this._socket.destroyed) throw new Error('Socket closed or destroyed during read');
+        const stream = this._stream;
+        if (!stream || !this._socket || this._socket.destroyed) {
+            throw new Error('Socket closed or destroyed during read');
+        }
         return new Promise((resolve, reject) => {
+            let settled = false;
             const cleanup = () => {
-                this._stream!.removeListener('readable', onReadable);
-                this._stream!.removeListener('close', onClose);
-                this._stream!.removeListener('error', onError);
-                this._stream!.removeListener('end', onClose);
+                if (settled) return;
+                settled = true;
+                stream.removeListener('readable', onReadable);
+                stream.removeListener('close', onClose);
+                stream.removeListener('error', onError);
+                stream.removeListener('end', onClose);
             };
             const onReadable = () => {
                 cleanup();
@@ -631,25 +675,26 @@ class NzConnection extends EventEmitter {
                 reject(err);
             };
 
-            this._stream!.once('readable', onReadable);
-            this._stream!.once('close', onClose);
-            this._stream!.once('end', onClose);
-            this._stream!.once('error', onError);
+            stream.once('readable', onReadable);
+            stream.once('close', onClose);
+            stream.once('end', onClose);
+            stream.once('error', onError);
         });
     }
 
     private async _waitForReadableTimeout(timeoutMs: number): Promise<boolean> {
-        if (!this._socket || this._socket.destroyed) return false;
+        const stream = this._stream;
+        if (!stream || !this._socket || this._socket.destroyed) return false;
         return new Promise((resolve) => {
             let settled = false;
             const cleanup = () => {
                 if (settled) return;
                 settled = true;
                 clearTimeout(timer);
-                this._stream!.removeListener('readable', onReadable);
-                this._stream!.removeListener('close', onDone);
-                this._stream!.removeListener('error', onDone);
-                this._stream!.removeListener('end', onDone);
+                stream.removeListener('readable', onReadable);
+                stream.removeListener('close', onDone);
+                stream.removeListener('error', onDone);
+                stream.removeListener('end', onDone);
             };
             const onReadable = () => {
                 cleanup();
@@ -667,15 +712,28 @@ class NzConnection extends EventEmitter {
                 Math.max(1, timeoutMs)
             );
 
-            this._stream!.once('readable', onReadable);
-            this._stream!.once('close', onDone);
-            this._stream!.once('end', onDone);
-            this._stream!.once('error', onDone);
+            stream.once('readable', onReadable);
+            stream.once('close', onDone);
+            stream.once('end', onDone);
+            stream.once('error', onDone);
         });
     }
 
     private _feedBuffer(buf: Buffer): void {
-        this._stream!.unshift(buf);
+        const stream = this._assertReadableStream();
+        stream.unshift(buf);
+    }
+
+    /**
+     * Returns the current stream, or throws a clean error when the connection
+     * has been closed while a reader is still being consumed.
+     */
+    private _assertReadableStream(): Stream {
+        const stream = this._stream;
+        if (!stream || !this._socket || this._socket.destroyed) {
+            throw new Error('Connection is closed');
+        }
+        return stream;
     }
 
     /** Copy any already-buffered socket bytes into the internal parse buffer. */
@@ -890,8 +948,9 @@ class NzConnection extends EventEmitter {
             this._ensureBufferCapacity(this._intBufStart + n);
         }
 
+        const stream = this._assertReadableStream();
         while (this._intBufEnd - this._intBufStart < n) {
-            const chunk = this._stream!.read() as Buffer | null;
+            const chunk = stream.read() as Buffer | null;
             if (chunk !== null) {
                 const space = this._intBuf.length - this._intBufEnd;
                 if (chunk.length <= space) {
@@ -900,7 +959,7 @@ class NzConnection extends EventEmitter {
                 } else {
                     chunk.copy(this._intBuf, this._intBufEnd, 0, space);
                     this._intBufEnd += space;
-                    this._stream!.unshift(chunk.slice(space));
+                    stream.unshift(chunk.slice(space));
                 }
             } else {
                 await this._waitForReadable();
@@ -930,17 +989,17 @@ class NzConnection extends EventEmitter {
 
         const execGen = this._commandGeneration + 1;
         let timer: NodeJS.Timeout | undefined;
-        const execPromise = this._doExecute(commandOrSql);
+        const execPromise = this._trackExecution(this._doExecute(commandOrSql));
 
         const timeoutPromise = new Promise<boolean>((resolve, reject) => {
-            timer = setTimeout(async () => {
+            timer = setTimeout(() => {
                 debug('Command timeout triggered');
-                try {
-                    await this.cancel(execGen);
-                } catch (e: unknown) {
-                    debug('Cancel failed during timeout:', (e as Error).message);
-                }
+                // Reject immediately so the caller always sees the timeout,
+                // regardless of how cancel() or the socket close race settles.
                 reject(new Error('Command execution timeout'));
+                this.cancel(execGen).catch((e: unknown) => {
+                    debug('Cancel failed during timeout:', (e as Error).message);
+                });
             }, timeoutSeconds * 1000);
         });
 
@@ -1005,17 +1064,17 @@ class NzConnection extends EventEmitter {
 
         const execGen = this._commandGeneration + 1;
         let timer: NodeJS.Timeout | undefined;
-        const execPromise = this._doExecuteReader(command);
+        const execPromise = this._trackExecution(this._doExecuteReader(command));
 
         const timeoutPromise = new Promise<NzDataReader>((resolve, reject) => {
-            timer = setTimeout(async () => {
+            timer = setTimeout(() => {
                 debug('Command timeout triggered');
-                try {
-                    await this.cancel(execGen);
-                    reject(new Error('Command execution timeout'));
-                } catch (e: unknown) {
-                    reject(new Error('Command execution timeout (Cancel failed: ' + (e as Error).message + ')'));
-                }
+                // Reject immediately so the caller always sees the timeout,
+                // regardless of how cancel() or the socket close race settles.
+                reject(new Error('Command execution timeout'));
+                this.cancel(execGen).catch((e: unknown) => {
+                    debug('Cancel failed during timeout:', (e as Error).message);
+                });
             }, timeoutSeconds * 1000);
         });
 
@@ -1023,7 +1082,17 @@ class NzConnection extends EventEmitter {
             return await Promise.race([execPromise, timeoutPromise]);
         } catch (err: unknown) {
             if ((err as Error).message && (err as Error).message.includes('Command execution timeout')) {
-                execPromise.catch(() => {});
+                // If the execution actually completed before the cancel landed,
+                // it resolved with a reader that nobody received. Close it so
+                // releaseCallback fires and _executing is not stuck as true,
+                // which would permanently block the connection.
+                execPromise
+                    .then((reader) => {
+                        if (reader) {
+                            reader.close().catch(() => undefined);
+                        }
+                    })
+                    .catch(() => undefined);
             }
             throw err;
         } finally {
@@ -1115,7 +1184,7 @@ class NzConnection extends EventEmitter {
                 : command.commandText;
         this._commandNumber++;
         if (this._commandNumber > 100000) this._commandNumber = 1;
-        this._stream!.write(buildSimpleQueryPacket(query, this._commandNumber));
+        this._assertReadableStream().write(buildSimpleQueryPacket(query, this._commandNumber));
     }
 
     private async *_responseGenerator(command: NzCommand): AsyncGenerator<ResponseMessage> {

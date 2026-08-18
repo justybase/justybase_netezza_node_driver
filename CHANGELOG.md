@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.4.2] - 2026-08-18
+
+### Changed
+- `commandTimeout` now rejects `execute()` / `executeReader()` immediately with `Command execution timeout`; `cancel()` runs in the background. The previous `Command execution timeout (Cancel failed: ...)` variant is gone, and the timeout can no longer lose the race to a concurrent `Socket closed/ended during read` error.
+
+### Fixed
+- Race between `connection.close()` and a timed-out `executeReader()`: `close()` waits for the in-flight protocol read to settle before clearing `_stream`, so listener cleanup no longer throws `TypeError: Cannot read properties of null (reading 'removeListener')`.
+- Read paths (`_ensureBufferData`, `_readBytesSlow`, `_feedBuffer`) use a locally captured stream and throw a clean `Connection is closed` error instead of a `TypeError` when a reader is consumed after the connection has been closed.
+- Idempotent listener cleanup in `_waitForReadable` (single-settle guard).
+- If an `executeReader()` times out but the underlying execution still completes, the orphaned reader is now closed so `_executing` is released and the connection is not permanently blocked.
+
 ## [2.4.1] - 2026-07-25
 
 ### Fixed
