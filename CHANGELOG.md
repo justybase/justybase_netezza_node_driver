@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.4.3] - 2026-08-19
+
+### Added
+- Configurable `clientType` for object-based connections. The default is the IBM Node.js client type `15`, with `ClientTypeId.SqlDotnet` (`11`) and other signed 16-bit values available for compatibility.
+
 ## [2.4.2] - 2026-08-18
 
 ### Changed
@@ -197,6 +202,7 @@ const str = reader.getString(0); // Recommended
 - Supports CommonJS module format
 - Includes debug logging support via `debug` package
 
+[2.4.3]: https://github.com/justybase/justybase_netezza_node_driver/compare/2.4.2...2.4.3
 [2.3.3]: https://github.com/justybase/justybase_netezza_node_driver/compare/2.3.2...2.3.3
 [2.3.2]: https://github.com/justybase/justybase_netezza_node_driver/compare/2.3.1...2.3.2
 [2.3.1]: https://github.com/justybase/justybase_netezza_node_driver/compare/2.3.0...2.3.1

@@ -57,6 +57,59 @@ describeNz('NzDriver - External Tables', () => {
         });
     });
 
+    test('Reports the Node client type on the live session', async () => {
+        const result = await conn.query('SHOW SESSION VERBOSE');
+        expect(result.rows).toHaveLength(1);
+        expect(Number(result.rows[0].CLIENT_TYPE)).toBe(15);
+    });
+
+    test('Client type 11 fallback preserves external table export and import', async () => {
+        const fallbackConn = new NzConnection({ ...config, clientType: 11 });
+        const externalPath = path.join(TEMP_DIR, 'js_et_client_type_11.dat');
+
+        try {
+            if (fs.existsSync(externalPath)) fs.unlinkSync(externalPath);
+            await fallbackConn.connect();
+
+            const session = await fallbackConn.query('SHOW SESSION VERBOSE');
+            expect(session.rows).toHaveLength(1);
+            expect(Number(session.rows[0].CLIENT_TYPE)).toBe(11);
+
+            await fallbackConn
+                .createCommand("CREATE TEMP TABLE ET_TYPE11_SOURCE AS SELECT 1 AS ID, 'Fallback' AS VAL")
+                .executeNonQuery();
+
+            await fallbackConn
+                .createCommand(`CREATE EXTERNAL TABLE '${externalPath}'
+                    USING (REMOTESOURCE 'jdbc' DELIMITER '|' LOGDIR '${TEMP_DIR}')
+                    AS SELECT * FROM ET_TYPE11_SOURCE`)
+                .executeNonQuery();
+
+            expect(fs.existsSync(externalPath)).toBe(true);
+            expect(fs.readFileSync(externalPath, 'utf8')).toContain('1|Fallback');
+
+            await fallbackConn
+                .createCommand('CREATE TEMP TABLE ET_TYPE11_DEST (ID INT, VAL VARCHAR(20))')
+                .executeNonQuery();
+
+            await fallbackConn
+                .createCommand(`INSERT INTO ET_TYPE11_DEST
+                    SELECT * FROM EXTERNAL '${externalPath}'
+                    USING (REMOTESOURCE 'jdbc' DELIMITER '|' LOGDIR '${TEMP_DIR}')`)
+                .executeNonQuery();
+
+            const rows = await fallbackConn.query('SELECT ID, VAL FROM ET_TYPE11_DEST');
+            expect(rows.rows).toEqual([{ ID: 1, VAL: 'Fallback' }]);
+
+            // Ensure the same connection remains synchronized after import.
+            const sentinel = await fallbackConn.query('SELECT COUNT(1) AS CNT FROM ET_TYPE11_DEST');
+            expect(Number(sentinel.rows[0].CNT)).toBe(1);
+        } finally {
+            await fallbackConn.close().catch(() => {});
+            if (fs.existsSync(externalPath)) fs.unlinkSync(externalPath);
+        }
+    }, 60000);
+
     test('Should create external table (Export)', async () => {
         const cmd = conn.createCommand("CREATE TEMP TABLE ET_SOURCE AS SELECT 1 AS ID, 'Test' AS VAL");
         await cmd.executeNonQuery();

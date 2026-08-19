@@ -78,6 +78,33 @@ const connection = new NzConnection(config);
 // or: new NzConnection('nz://admin:secret@host/JUST_DATA');
 ```
 
+### Netezza client type
+
+The handshake identifies the connection as a Node.js client by default
+(`clientType = 15`). For compatibility with systems that require another
+client identity, set `clientType` in the object configuration:
+
+```typescript
+import { ClientTypeId, NzConnection } from '@justybase/netezza-driver';
+
+const connection = new NzConnection({
+    host: 'your-nz-host',
+    database: 'JUST_DATA',
+    user: 'admin',
+    password: 'password',
+    clientType: ClientTypeId.Node,       // 15, default
+    // clientType: ClientTypeId.SqlDotnet, // 11, compatibility fallback
+});
+```
+
+Known identifiers are available as `ClientTypeId`: `Invalid` (-1), `None`
+(0), `Sql` (1), `SqlOdbc` (2), `SqlJdbc` (3), `Load` (4), `Client` (5),
+`Bnr` (6), `Reclaim` (7), `Unknown` (8), `SqlOledb` (9), `Internal` (10),
+`SqlDotnet` (11), `SqlGolang` (12), `SqlPython` (13), `Unknown2` (14), and
+`Node` (15). Other signed 16-bit values can also be supplied for server-
+specific or future client types. This option is available in object
+configuration; connection-string query parameters do not change it.
+
 ### Errors
 
 Failed queries and authentication errors throw `NzDatabaseError` (extends `Error`) with optional `severity`, `code` (SQLSTATE), `detail`, `hint`, and `raw` payload fields.

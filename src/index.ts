@@ -8,3 +8,5 @@ export type { TimeValue } from './types/TypeConversions';
 export { NzDatabaseError, createNzDatabaseError, parseBackendErrorFields } from './errors/NzDatabaseError';
 export { parseConnectionString } from './connectionString';
 export { escapeLiteral, substituteParameters } from './protocol/sqlParameters';
+export { ClientTypeId } from './clientTypes';
+export type { ClientTypeIdValue } from './clientTypes';

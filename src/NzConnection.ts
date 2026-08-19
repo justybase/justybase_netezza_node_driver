@@ -16,6 +16,7 @@ import { createNzDatabaseError } from './errors/NzDatabaseError';
 import { substituteParameters } from './protocol/sqlParameters';
 import { parseConnectionString } from './connectionString';
 import { ExternalTableHandler, ExternalTableIO } from './external/ExternalTableHandler';
+import { normalizeClientType } from './clientTypes';
 import createDebug from 'debug';
 
 const debug = createDebug('nz:connection');
@@ -77,6 +78,8 @@ export interface NzConnectionConfig {
     osUser?: string;
     /** Client hostname reported to Netezza */
     clientHostName?: string;
+    /** Numeric Netezza client type sent in the handshake (default: Node, 15) */
+    clientType?: number;
 }
 
 export interface QueryResult {
@@ -234,6 +237,7 @@ class NzConnection extends EventEmitter {
     constructor(config: NzConnectionConfig | string) {
         super();
         this.config = typeof config === 'string' ? parseConnectionString(config) : config;
+        normalizeClientType(this.config.clientType);
         this._initBuffer();
         if (this.config.connectionTimeout !== undefined) {
             this.connectionTimeout = this.config.connectionTimeout;

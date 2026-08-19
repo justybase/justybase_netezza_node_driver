@@ -8,6 +8,7 @@ import { PGUtil } from './utils/PGUtil';
 import { BackendMessageCode, HandshakeCode, ProtocolVersion } from './protocol/constants';
 import { createNzDatabaseError, NzDatabaseError } from './errors/NzDatabaseError';
 import { SocketTransport } from './transport/SocketTransport';
+import { normalizeClientType } from './clientTypes';
 import createDebug from 'debug';
 
 const debug = createDebug('nz:handshake');
@@ -22,6 +23,8 @@ interface HandshakeOptions {
     osUser?: string;
     /** Client hostname reported to Netezza */
     clientHostName?: string;
+    /** Numeric Netezza client type sent in the handshake (default: Node, 15) */
+    clientType?: number;
 }
 
 type Stream = net.Socket | tls.TLSSocket;
@@ -41,8 +44,7 @@ class Handshake {
     private _guardiumClientOSUser: string;
     private _guardiumAppName: string;
     private _guardiumClientHostName: string;
-
-    readonly NPSCLIENT_TYPE_DOTNET = 11;
+    private _clientType: number;
 
     public backendProcessId: number = 0;
     public backendSecretKey: number = 0;
@@ -53,6 +55,7 @@ class Handshake {
         this._host = host;
         this._options = options;
         this._transport.attach(stream);
+        this._clientType = normalizeClientType(options.clientType);
 
         this._guardiumClientOS = process.platform;
         this._guardiumClientOSUser = options.osUser || process.env.USERNAME || process.env.USER || 'unknown';
@@ -299,7 +302,7 @@ class Handshake {
                     len = 4 + 2 + 2;
                     PGUtil.writeInt32(this._stream, len);
                     PGUtil.writeInt16(this._stream, information);
-                    PGUtil.writeInt16(this._stream, 11);
+                    PGUtil.writeInt16(this._stream, this._clientType);
                     if (hsVersion >= 5) information = HandshakeCode.HSV2_64BIT_VARLENA_ENABLED;
                     else information = HandshakeCode.HSV2_CLIENT_DONE;
                     break;
@@ -359,7 +362,7 @@ class Handshake {
                         len = 4 + 2 + 2;
                         PGUtil.writeInt32(this._stream, len);
                         PGUtil.writeInt16(this._stream, information);
-                        PGUtil.writeInt16(this._stream, 11);
+                        PGUtil.writeInt16(this._stream, this._clientType);
                         if (hsVersion === ProtocolVersion.CP_VERSION_5 || hsVersion === ProtocolVersion.CP_VERSION_6) {
                             information = HandshakeCode.HSV2_64BIT_VARLENA_ENABLED;
                         } else {
