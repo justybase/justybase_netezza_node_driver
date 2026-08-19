@@ -1,6 +1,6 @@
 {
   "name": "@justybase/netezza-driver",
-  "version": "2.4.3",
+  "version": "2.4.4",
   "description": "Native TypeScript driver for IBM Netezza / PureData System for Analytics",
   "main": "./dist/cjs/index.js",
   "module": "./dist/esm/index.js",

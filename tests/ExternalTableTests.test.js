@@ -1,6 +1,7 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { Readable } = require('stream');
 const { NzConnection } = require('../dist/cjs/NzConnection');
 
 const { getNzConfig } = require('./helpers/env');
@@ -146,6 +147,39 @@ describeNz('NzDriver - External Tables', () => {
         expect(rows[0][0]).toBe(1);
         expect(rows[0][1]).toBe('Test');
     });
+
+    test('Should read from a registered virtual import stream', async () => {
+        const virtualId = 'virtual://external-table-test';
+        const data = Buffer.from('1|Virtual\n2|Stream\n', 'utf8');
+        const stream = Readable.from([data]);
+        stream.byteLength = data.length;
+
+        NzConnection.registerImportStream(virtualId, stream);
+
+        try {
+            await conn.createCommand('DROP TABLE ET_VIRTUAL_DEST IF EXISTS').executeNonQuery();
+            await conn
+                .createCommand('CREATE TEMP TABLE ET_VIRTUAL_DEST (ID INT, VAL VARCHAR(20))')
+                .executeNonQuery();
+
+            const sql = `INSERT INTO ET_VIRTUAL_DEST
+                         SELECT * FROM EXTERNAL '${virtualId}'
+                         USING (REMOTESOURCE 'jdbc' DELIMITER '|' LOGDIR '${TEMP_DIR}')`;
+            await conn.createCommand(sql).executeNonQuery();
+
+            const rows = await conn.query('SELECT ID, VAL FROM ET_VIRTUAL_DEST ORDER BY ID');
+            expect(rows.rows).toEqual([
+                { ID: 1, VAL: 'Virtual' },
+                { ID: 2, VAL: 'Stream' },
+            ]);
+
+            const sentinel = await conn.query('SELECT COUNT(1) AS CNT FROM ET_VIRTUAL_DEST');
+            expect(Number(sentinel.rows[0].CNT)).toBe(2);
+        } finally {
+            NzConnection.unregisterImportStream(virtualId);
+            await conn.createCommand('DROP TABLE ET_VIRTUAL_DEST IF EXISTS').executeNonQuery().catch(() => {});
+        }
+    }, 30000);
 
     // Multi-table test matching C# TestExternalTable
     const tablesToTest = ['DIMPRODUCT', 'DIMCURRENCY', 'DIMDATE'];

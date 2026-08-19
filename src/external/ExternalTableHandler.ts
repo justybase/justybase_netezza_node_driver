@@ -231,57 +231,51 @@ export class ExternalTableHandler {
 
         let bytesSent = 0;
 
-        await new Promise<void>((resolve, reject) => {
-            readStream.on('data', (chunk: string | Buffer) => {
+        try {
+            // Consume the stream sequentially. The previous data/end event
+            // implementation could emit DONE while an asynchronous DATA write
+            // was still pending, especially for already-buffered virtual streams.
+            for await (const chunk of readStream) {
                 const chunkBuf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
                 const header = Buffer.alloc(8);
                 PGUtil.writeInt32(header, ExtabSock.DATA, 0);
                 PGUtil.writeInt32(header, chunkBuf.length, 4);
 
-                // Pause while writing so backpressure can be awaited via IO.write
-                readStream.pause();
-                void (async () => {
-                    try {
-                        await this._io.write(header);
-                        await this._io.write(chunkBuf);
+                await this._io.write(header);
+                await this._io.write(chunkBuf);
 
-                        bytesSent += chunkBuf.length;
-                        this._io.emit('importProgress', {
-                            bytesSent,
-                            totalSize,
-                            percentComplete: totalSize > 0 ? Math.round((bytesSent / totalSize) * 100) : 0,
-                        });
-                        readStream.resume();
-                    } catch (err) {
-                        reject(err);
-                    }
-                })();
-            });
+                bytesSent += chunkBuf.length;
+                this._io.emit('importProgress', {
+                    bytesSent,
+                    totalSize,
+                    percentComplete: totalSize > 0 ? Math.round((bytesSent / totalSize) * 100) : 0,
+                });
+            }
 
-            readStream.on('end', () => {
-                debug('Import Stream End');
-                const doneBuf = Buffer.alloc(4);
-                PGUtil.writeInt32(doneBuf, ExtabSock.DONE, 0);
-                void Promise.resolve(this._io.write(doneBuf)).then(() => resolve(), reject);
-            });
+            debug('Import Stream End');
+            const doneBuf = Buffer.alloc(4);
+            PGUtil.writeInt32(doneBuf, ExtabSock.DONE, 0);
+            await this._io.write(doneBuf);
+        } catch (err) {
+            const error = err instanceof Error ? err : new Error(String(err));
+            debug('Import Stream Error:', error);
 
-            readStream.on('error', (err) => {
-                debug('Import Stream Error:', err);
-                void (async () => {
-                    try {
-                        const errBuf = Buffer.alloc(4);
-                        PGUtil.writeInt32(errBuf, ExtabSock.ERROR, 0);
-                        await this._io.write(errBuf);
-                        const msg = err.message || 'Error';
-                        const lenBuf = Buffer.alloc(2);
-                        lenBuf.writeInt16BE(msg.length);
-                        await this._io.write(lenBuf);
-                        await this._io.write(Buffer.from(msg, 'utf8'));
-                    } finally {
-                        reject(err);
-                    }
-                })();
-            });
-        });
+            try {
+                const errBuf = Buffer.alloc(4);
+                PGUtil.writeInt32(errBuf, ExtabSock.ERROR, 0);
+                await this._io.write(errBuf);
+
+                const message = Buffer.from(error.message || 'Error', 'utf8');
+                const messageLength = Math.min(message.length, 0x7fff);
+                const lenBuf = Buffer.alloc(2);
+                lenBuf.writeInt16BE(messageLength);
+                await this._io.write(lenBuf);
+                await this._io.write(message.subarray(0, messageLength));
+            } catch (protocolError) {
+                debug('Error sending import stream failure:', protocolError);
+            }
+
+            throw err;
+        }
     }
 }
