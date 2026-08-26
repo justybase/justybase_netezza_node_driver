@@ -20,8 +20,8 @@
     "NOTICE"
   ],
   "scripts": {
-    "build": "npm run clean && tsc -p tsconfig.cjs.json && tsc -p tsconfig.esm.json && node scripts/fix-esm-package.js",
-    "build:watch": "tsc -p tsconfig.cjs.json --watch",
+    "build": "npm run clean && node ./node_modules/typescript/lib/tsc.js -p tsconfig.cjs.json && node ./node_modules/typescript/lib/tsc.js -p tsconfig.esm.json && node scripts/fix-esm-package.js",
+    "build:watch": "node ./node_modules/typescript/lib/tsc.js -p tsconfig.cjs.json --watch",
     "clean": "rimraf dist",
     "docs": "typedoc --entryPoints src/index.ts --out docs-api",
     "format": "prettier --write src/",

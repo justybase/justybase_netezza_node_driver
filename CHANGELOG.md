@@ -16,7 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Length-prefixed protocol fields and DBOS row bounds are validated defensively; malformed responses poison the connection and require reconnecting instead of allowing an unsafe connection to return to a pool.
 - Legacy Netezza authentication errors returned as NUL-terminated text are now surfaced as database errors while malformed binary response lengths remain rejected.
 - Pool shutdown and handshake/connection timeout races now reject pending checkouts and cannot resurrect removed clients.
-- CI now tests Node.js 18, 20, and 22 and reports coverage for the offline unit suite.
+- CI now tests the supported Node.js 22 and 24 LTS lines and reports coverage for the offline unit suite.
+
+### Changed
+- The build invokes TypeScript through its explicit JavaScript entry point, avoiding the extensionless launcher incompatibility on older Node.js runtimes.
 
 ## [2.4.4] - 2026-08-19
 

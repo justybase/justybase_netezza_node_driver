@@ -12,7 +12,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        node-version: ['18.18.x', '20.x', '22.x']
+        # Test the currently supported Node.js LTS lines; 18 and 20 are EOL.
+        node-version: ['22.x', '24.x']
 
     steps:
       - uses: actions/checkout@v7
