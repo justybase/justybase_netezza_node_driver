@@ -3,6 +3,7 @@ import * as path from 'path';
 import { Readable } from 'stream';
 import { ExtabSock } from '../protocol/constants';
 import { PGUtil } from '../utils/PGUtil';
+import { validateProtocolLength } from '../protocol/ProtocolLength';
 import createDebug from 'debug';
 
 const debug = createDebug('nz:external');
@@ -51,7 +52,7 @@ export class ExternalTableHandler {
         try {
             while (true) {
                 const lenBuf = await this._io.readBytes(4);
-                const len = PGUtil.readInt32(lenBuf);
+                const len = validateProtocolLength(PGUtil.readInt32(lenBuf), 'externalTableLogChunk');
                 if (len === 0) break; // EOF
 
                 const data = await this._io.readBytes(len);
@@ -78,7 +79,11 @@ export class ExternalTableHandler {
         await this._io.readBytes(4);
         await this._io.readBytes(10);
         await this._io.readBytes(16);
-        const len = PGUtil.readInt32(await this._io.readBytes(4));
+        const len = validateProtocolLength(
+            PGUtil.readInt32(await this._io.readBytes(4)),
+            'externalTableExportFilename',
+            { allowZero: false }
+        );
         const filenameBuf = await this._io.readBytes(len);
         const filename = filenameBuf.toString('utf8');
         debug('ExternalTable Export Start. File:', filename);
@@ -125,7 +130,10 @@ export class ExternalTableHandler {
             debug('ExtTab Status:', status);
 
             if (status === ExtabSock.DATA) {
-                const numBytes = PGUtil.readInt32(await this._io.readBytes(4));
+                const numBytes = validateProtocolLength(
+                    PGUtil.readInt32(await this._io.readBytes(4)),
+                    'externalTableExportDataChunk'
+                );
                 debug('Block Length:', numBytes);
                 const data = await this._io.readBytes(numBytes);
                 if (writeStream) {
@@ -169,7 +177,10 @@ export class ExternalTableHandler {
                 }
                 return;
             } else if (status === ExtabSock.ERROR) {
-                const len = PGUtil.readInt16(await this._io.readBytes(2));
+                const len = validateProtocolLength(
+                    PGUtil.readInt16(await this._io.readBytes(2)),
+                    'externalTableErrorMessage'
+                );
                 const msg = (await this._io.readBytes(len)).toString('utf8');
                 debug('ExternalTable Data Error:', msg);
                 if (writeStream) writeStream.end();
@@ -203,7 +214,10 @@ export class ExternalTableHandler {
         debug('Sent Client Version');
 
         const format = PGUtil.readInt32(await this._io.readBytes(4));
-        const bufSize = PGUtil.readInt32(await this._io.readBytes(4));
+        const bufSize = validateProtocolLength(
+            PGUtil.readInt32(await this._io.readBytes(4)),
+            'externalTableImportBufferSize'
+        );
 
         debug('ExtTab Import Config:', { hostVersion, format, bufSize });
 

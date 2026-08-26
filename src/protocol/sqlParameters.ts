@@ -45,9 +45,113 @@ export function escapeLiteral(value: unknown): string {
  */
 export function substituteParameters(sql: string, params: unknown[]): string {
     if (!params || params.length === 0) return sql;
-    return sql.replace(/\$(\d+)/g, (match, indexStr: string) => {
-        const idx = parseInt(indexStr, 10) - 1;
-        if (idx < 0 || idx >= params.length) return match;
-        return escapeLiteral(params[idx]);
-    });
+
+    let result = '';
+    let i = 0;
+    let dollarQuote: string | null = null;
+
+    while (i < sql.length) {
+        if (dollarQuote) {
+            if (sql.startsWith(dollarQuote, i)) {
+                result += dollarQuote;
+                i += dollarQuote.length;
+                dollarQuote = null;
+            } else {
+                result += sql[i++];
+            }
+            continue;
+        }
+
+        const ch = sql[i];
+
+        // SQL line comments do not contain parameters. Preserve the complete
+        // comment, including its line terminator, byte-for-byte.
+        if (ch === '-' && sql[i + 1] === '-') {
+            const lineEnd = sql.indexOf('\n', i + 2);
+            if (lineEnd === -1) {
+                result += sql.slice(i);
+                break;
+            }
+            result += sql.slice(i, lineEnd + 1);
+            i = lineEnd + 1;
+            continue;
+        }
+
+        // SQL block comments may contain arbitrary '$1'-like text.
+        if (ch === '/' && sql[i + 1] === '*') {
+            const commentEnd = sql.indexOf('*/', i + 2);
+            if (commentEnd === -1) {
+                result += sql.slice(i);
+                break;
+            }
+            result += sql.slice(i, commentEnd + 2);
+            i = commentEnd + 2;
+            continue;
+        }
+
+        if (ch === "'") {
+            const start = i++;
+            while (i < sql.length) {
+                if (sql[i] === '\\' && i + 1 < sql.length) {
+                    i += 2;
+                    continue;
+                }
+                if (sql[i] !== "'") {
+                    i++;
+                    continue;
+                }
+                if (sql[i + 1] === "'") {
+                    i += 2;
+                    continue;
+                }
+                i++;
+                break;
+            }
+            result += sql.slice(start, i);
+            continue;
+        }
+
+        if (ch === '"') {
+            const start = i++;
+            while (i < sql.length) {
+                if (sql[i] === '"' && sql[i + 1] === '"') {
+                    i += 2;
+                    continue;
+                }
+                if (sql[i] === '"') {
+                    i++;
+                    break;
+                }
+                i++;
+            }
+            result += sql.slice(start, i);
+            continue;
+        }
+
+        // Preserve PostgreSQL/Netezza dollar-quoted bodies, including bodies
+        // used by procedural SQL. A numeric suffix is a parameter, not a tag.
+        if (ch === '$') {
+            const tagMatch = sql.slice(i).match(/^\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$/);
+            if (tagMatch) {
+                dollarQuote = tagMatch[0];
+                result += dollarQuote;
+                i += dollarQuote.length;
+                continue;
+            }
+
+            const parameterMatch = sql.slice(i).match(/^\$(\d+)/);
+            if (parameterMatch) {
+                const match = parameterMatch[0];
+                const idx = parseInt(parameterMatch[1], 10) - 1;
+                result += idx >= 0 && idx < params.length ? escapeLiteral(params[idx]) : match;
+                i += match.length;
+                continue;
+            }
+        }
+
+        result += ch;
+        i++;
+    }
+
+    return result;
 }

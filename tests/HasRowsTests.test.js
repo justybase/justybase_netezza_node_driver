@@ -124,4 +124,68 @@ describeNz('HasRowsTests', () => {
         expect(results).toEqual([true]);
     });
 
+    test('NextResult called before the current result is consumed skips remaining rows', async () => {
+        const query =
+            'SELECT 1 AS value FROM JUST_DATA.ADMIN.DIMDATE ORDER BY ROWID LIMIT 3; ' +
+            'SELECT 99 AS value';
+        const reader = await connection.createCommand(query).executeReader();
+
+        try {
+            expect(await reader.read()).toBe(true);
+            expect(Number(reader.getValue(0))).toBe(1);
+
+            // The remaining rows from the first result must not be exposed after
+            // moving to the second result set.
+            expect(await reader.nextResult()).toBe(true);
+            expect(reader.fieldCount).toBe(1);
+            expect(await reader.read()).toBe(true);
+            expect(Number(reader.getValue(0))).toBe(99);
+            expect(await reader.read()).toBe(false);
+            expect(await reader.nextResult()).toBe(false);
+        } finally {
+            await reader.close();
+        }
+    });
+
+    test.each([0, 1, 499, 500, 501, 1000])(
+        'reads exactly the requested number of rows at the %i-row boundary',
+        async (limit) => {
+            const reader = await connection
+                .createCommand(`SELECT * FROM JUST_DATA.ADMIN.DIMDATE ORDER BY ROWID LIMIT ${limit}`)
+                .executeReader();
+            let rows = 0;
+
+            try {
+                while (await reader.read()) rows++;
+            } finally {
+                await reader.close();
+            }
+
+            expect(rows).toBe(limit);
+        }
+    );
+
+    test('closing after row 499 leaves the session aligned for subsequent commands', async () => {
+        const reader = await connection
+            .createCommand('SELECT * FROM JUST_DATA.ADMIN.DIMDATE ORDER BY ROWID LIMIT 501')
+            .executeReader();
+
+        try {
+            for (let row = 1; row <= 499; row++) {
+                expect(await reader.read()).toBe(true);
+            }
+        } finally {
+            await reader.close();
+        }
+
+        const scalarReader = await connection.createCommand('SELECT 123 AS value').executeReader();
+        try {
+            expect(await scalarReader.read()).toBe(true);
+            expect(Number(scalarReader.getValue(0))).toBe(123);
+            expect(await scalarReader.read()).toBe(false);
+        } finally {
+            await scalarReader.close();
+        }
+    });
+
 });

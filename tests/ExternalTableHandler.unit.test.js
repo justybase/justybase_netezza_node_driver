@@ -3,7 +3,7 @@ const { Readable } = require('stream');
 const { ExternalTableHandler } = require('../dist/cjs/external/ExternalTableHandler');
 const { ExtabSock } = require('../dist/cjs/protocol/constants');
 
-function createImportInput(filename) {
+function createImportInput(filename, bufSize = 64) {
     const filenameBuf = Buffer.from(`${filename}\0`, 'utf8');
     const input = Buffer.alloc(8 + filenameBuf.length + 12);
     let offset = 8;
@@ -14,13 +14,13 @@ function createImportInput(filename) {
     offset += 4;
     input.writeInt32BE(1, offset);
     offset += 4;
-    input.writeInt32BE(64, offset);
+    input.writeInt32BE(bufSize, offset);
 
     return input;
 }
 
-function createIo(filename, stream, { hasImportStream = true, write = null } = {}) {
-    const input = createImportInput(filename);
+function createIo(filename, stream, { hasImportStream = true, write = null, bufSize = 64, input: suppliedInput } = {}) {
+    const input = suppliedInput || createImportInput(filename, bufSize);
     let inputOffset = 0;
     const writes = [];
     const events = [];
@@ -123,5 +123,34 @@ describe('ExternalTableHandler virtual imports', () => {
         expect(io.writes[2]).toEqual(Buffer.from([0, 21]));
         expect(io.writes[3]).toEqual(Buffer.from('virtual stream failed'));
         expect(io.writes).not.toContainEqual(Buffer.from([0, 0, 0, ExtabSock.DONE]));
+    });
+
+    test('rejects a negative import buffer size before opening the source', async () => {
+        const io = createIo('virtual://invalid-buffer-size', Readable.from([]), { bufSize: -1 });
+
+        await expect(new ExternalTableHandler(io).handleImport()).rejects.toThrow(/externalTableImportBufferSize/);
+        expect(io.writes).toEqual([Buffer.from([0, 0, 0, 1])]);
+    });
+
+    test('rejects a negative export data chunk length', async () => {
+        const input = Buffer.concat([
+            Buffer.alloc(8),
+            Buffer.from([0, 0, 0, ExtabSock.DATA]),
+            Buffer.from([0xff, 0xff, 0xff, 0xff]),
+        ]);
+        const io = createIo('unused', Readable.from([]), { input });
+
+        await expect(new ExternalTableHandler(io).handleExportData()).rejects.toThrow(/externalTableExportDataChunk/);
+    });
+
+    test('rejects a negative external-table error message length', async () => {
+        const input = Buffer.concat([
+            Buffer.alloc(8),
+            Buffer.from([0, 0, 0, ExtabSock.ERROR]),
+            Buffer.from([0xff, 0xff]),
+        ]);
+        const io = createIo('unused', Readable.from([]), { input });
+
+        await expect(new ExternalTableHandler(io).handleExportData()).rejects.toThrow(/externalTableErrorMessage/);
     });
 });

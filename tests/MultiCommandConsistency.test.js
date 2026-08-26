@@ -124,10 +124,36 @@ describeNz('NzDriver - Multi-Command Consistency', () => {
             expect(await reader.read()).toBe(true);
             // Text format returns strings, so convert to number for comparison
             expect(Number(reader.getValue(0))).toBe(i + 1);
-            // Must fully consume or close reader before next command
+            // CommandComplete ends the result set, while close() drains the
+            // remaining protocol messages through ReadyForQuery.
             while (await reader.read()) { /* consume remaining */ }
+            await reader.close();
         }
 
         await conn.close();
     });
+
+    test('Partial reader close drains the result before the next command', async () => {
+        const conn = new NzConnection(config);
+        await conn.connect();
+
+        try {
+            const partialReader = await conn.createCommand(SQL1).executeReader();
+            expect(await partialReader.read()).toBe(true);
+            await partialReader.close();
+
+            const scalarReader = await conn.createCommand('SELECT 99 AS value').executeReader();
+            expect(await scalarReader.read()).toBe(true);
+            expect(Number(scalarReader.getValue(0))).toBe(99);
+            expect(await scalarReader.read()).toBe(false);
+            await scalarReader.close();
+
+            const verificationReader = await conn.createCommand(SQL1).executeReader();
+            const rows = await readAllRows(verificationReader);
+            await verificationReader.close();
+            expect(rows).toHaveLength(10);
+        } finally {
+            await conn.close();
+        }
+    }, 30000);
 });

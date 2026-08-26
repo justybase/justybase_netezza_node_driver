@@ -5,7 +5,8 @@ const crypto = require('crypto');
 
 const { getNzConfig } = require('./helpers/env');
 const config = (() => { try { return getNzConfig(); } catch (e) { return null; } })();
-const describeNz = config ? describe : describe.skip;
+const jestDescribe = typeof describe === 'function' ? describe : null;
+const describeNz = config ? (jestDescribe || (() => {})) : (jestDescribe ? jestDescribe.skip : (() => {}));
 
 
 const connectionString = config

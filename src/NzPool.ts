@@ -80,6 +80,8 @@ class NzPool extends EventEmitter {
     private _endCallback: (() => void) | undefined;
     private _useCount: WeakMap<NzConnection, number> = new WeakMap();
     private _removing: WeakSet<NzConnection> = new WeakSet();
+    private _connecting: WeakSet<NzConnection> = new WeakSet();
+    private _connectingRequests: WeakMap<NzConnection, PendingItem> = new WeakMap();
 
     private readonly _max: number;
     private readonly _min: number;
@@ -99,6 +101,27 @@ class NzPool extends EventEmitter {
         this._maxUses = config.maxUses ?? Infinity;
         this._maxLifetimeSeconds = config.maxLifetimeSeconds ?? 0;
         this._allowExitOnIdle = config.allowExitOnIdle ?? false;
+
+        if (!Number.isInteger(this._max) || this._max <= 0) {
+            throw new RangeError('Pool max must be a positive integer');
+        }
+        if (!Number.isInteger(this._min) || this._min < 0 || this._min > this._max) {
+            throw new RangeError('Pool min must be an integer between 0 and max');
+        }
+        if (!Number.isFinite(this._idleTimeoutMillis) || this._idleTimeoutMillis < 0) {
+            throw new RangeError('Pool idleTimeoutMillis must be a non-negative finite number');
+        }
+        if (!Number.isFinite(this._connectionTimeoutMillis) || this._connectionTimeoutMillis < 0) {
+            throw new RangeError('Pool connectionTimeoutMillis must be a non-negative finite number');
+        }
+        if (!Number.isFinite(this._maxLifetimeSeconds) || this._maxLifetimeSeconds < 0) {
+            throw new RangeError('Pool maxLifetimeSeconds must be a non-negative finite number');
+        }
+        if (!Number.isFinite(this._maxUses) || this._maxUses <= 0) {
+            if (this._maxUses !== Infinity) {
+                throw new RangeError('Pool maxUses must be a positive finite number or Infinity');
+            }
+        }
 
         if (this._min > 0) {
             process.nextTick(() => this._ensureMinIdle());
@@ -244,6 +267,7 @@ class NzPool extends EventEmitter {
             });
         }
         this._ending = true;
+        this._rejectPending(new Error('Cannot use a pool after calling end on the pool'));
 
         return new Promise<void>((resolve) => {
             this._endCallback = resolve;
@@ -266,12 +290,14 @@ class NzPool extends EventEmitter {
         const client = new NzConnection(this._config);
         this._clients.push(client);
         this._useCount.set(client, 0);
+        this._connecting.add(client);
 
         debug('pre-creating idle client for min pool size');
 
         client
             .connect()
             .then(() => {
+                this._connecting.delete(client);
                 if (this._ending || this._ended) {
                     this._remove(client);
                     return;
@@ -282,10 +308,14 @@ class NzPool extends EventEmitter {
                 this._pulseQueue();
             })
             .catch((err: Error) => {
+                this._connecting.delete(client);
                 debug('idle warmup client failed to connect', err);
                 this._clients = this._clients.filter((c) => c !== client);
                 this._useCount.delete(client);
                 this.emit('error', err);
+                // A failed warmup client no longer occupies a pool slot. Wake
+                // queued callers so they can create a replacement connection.
+                this._pulseQueue();
             });
     }
 
@@ -312,6 +342,13 @@ class NzPool extends EventEmitter {
 
         if (this._ending) {
             debug('pulse queue on ending');
+            // A client which is still connecting has not been handed to a
+            // caller, so it can be closed immediately. Checked-out clients
+            // remain alive until their release callback returns them here.
+            const connectingCopy = this._clients.filter((client) => this._connecting.has(client));
+            for (const client of connectingCopy) {
+                this._remove(client);
+            }
             // Close all idle connections
             if (this._idle.length) {
                 const idleCopy = this._idle.slice();
@@ -355,6 +392,8 @@ class NzPool extends EventEmitter {
         const client = new NzConnection(this._config);
         this._clients.push(client);
         this._useCount.set(client, 0);
+        this._connecting.add(client);
+        this._connectingRequests.set(client, pendingItem);
 
         debug('connecting new client');
 
@@ -366,14 +405,41 @@ class NzPool extends EventEmitter {
             tid = setTimeout(() => {
                 debug('ending client due to connection timeout');
                 timeoutHit = true;
-                void client.close();
+                this._remove(
+                    client,
+                    () => this._pulseQueue(),
+                    new Error('Connection terminated due to connection timeout')
+                );
             }, this._connectionTimeoutMillis);
+            if (tid.unref) tid.unref();
         }
 
         client
             .connect()
             .then(() => {
+                this._connecting.delete(client);
+                this._connectingRequests.delete(client);
                 if (tid) clearTimeout(tid);
+
+                if (!this._clients.includes(client) || pendingItem.timedOut) {
+                    // A timeout, pool shutdown, or another lifecycle event may
+                    // have removed the client while connect() was still pending.
+                    // Never hand that connection to a caller after removal.
+                    if (!pendingItem.timedOut) {
+                        pendingItem.timedOut = true;
+                        pendingItem.callback(new Error('Connection was removed before it became ready'));
+                    }
+                    return;
+                }
+
+                if (this._ending || this._ended) {
+                    if (!pendingItem.timedOut) {
+                        pendingItem.timedOut = true;
+                        pendingItem.callback(new Error('Cannot use a pool after calling end on the pool'));
+                    }
+                    this._remove(client, () => this._pulseQueue());
+                    return;
+                }
 
                 this._attachClientLifecycle(client);
 
@@ -396,6 +462,8 @@ class NzPool extends EventEmitter {
                 this._acquireClient(client, pendingItem, true);
             })
             .catch((err: Error) => {
+                this._connecting.delete(client);
+                this._connectingRequests.delete(client);
                 if (tid) clearTimeout(tid);
                 debug('client failed to connect', err);
                 this._clients = this._clients.filter((c) => c !== client);
@@ -437,6 +505,14 @@ class NzPool extends EventEmitter {
     }
 
     private _release(client: NzConnection, err?: Error): void {
+        if (!this._clients.includes(client)) {
+            // A socket error/close can remove a checked-out client before the
+            // caller's finally block invokes release(). Never reinsert that
+            // dead client into the idle queue.
+            this.emit('release', err, client);
+            return;
+        }
+
         const useCount = (this._useCount.get(client) || 0) + 1;
         this._useCount.set(client, useCount);
 
@@ -485,12 +561,23 @@ class NzPool extends EventEmitter {
         this._pulseQueue();
     }
 
-    private _remove(client: NzConnection, callback?: () => void): void {
+    private _remove(
+        client: NzConnection,
+        callback?: () => void,
+        pendingError: Error = new Error('Cannot use a pool after calling end on the pool')
+    ): void {
         if (this._removing.has(client) || !this._clients.includes(client)) {
             if (callback) callback();
             return;
         }
         this._removing.add(client);
+        this._connecting.delete(client);
+        const connectingRequest = this._connectingRequests.get(client);
+        this._connectingRequests.delete(client);
+        if (connectingRequest && !connectingRequest.timedOut) {
+            connectingRequest.timedOut = true;
+            connectingRequest.callback(pendingError);
+        }
 
         // Remove from idle list
         const idleIdx = this._idle.findIndex((item) => item.client === client);
@@ -510,6 +597,15 @@ class NzPool extends EventEmitter {
 
         this.emit('remove', client);
         if (callback) callback();
+    }
+
+    private _rejectPending(error: Error): void {
+        const pending = this._pendingQueue.splice(0);
+        for (const item of pending) {
+            if (item.timedOut) continue;
+            item.timedOut = true;
+            item.callback(error);
+        }
     }
 }
 

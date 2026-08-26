@@ -70,4 +70,23 @@ describe('substituteParameters', () => {
     test('supports repeated placeholder references', () => {
         expect(substituteParameters('SELECT $1 || $1', ['ab'])).toBe("SELECT 'ab' || 'ab'");
     });
+
+    test('does not replace placeholders inside string literals or escaped strings', () => {
+        const sql = "SELECT '$1', E'escaped \\\'$2\\'', $1";
+        expect(substituteParameters(sql, ['value', 'other'])).toBe(
+            "SELECT '$1', E'escaped \\\'$2\\'', 'value'"
+        );
+    });
+
+    test('does not replace placeholders inside quoted identifiers or comments', () => {
+        const sql = 'SELECT "$1", $1 /* $2 */ -- $2\n, $2';
+        expect(substituteParameters(sql, ['first', 'second'])).toBe(
+            'SELECT "$1", \'first\' /* $2 */ -- $2\n, \'second\''
+        );
+    });
+
+    test('preserves dollar-quoted procedural bodies', () => {
+        const sql = 'SELECT $$BEGIN RETURN $1; END$$, $1';
+        expect(substituteParameters(sql, ['value'])).toBe("SELECT $$BEGIN RETURN $1; END$$, 'value'");
+    });
 });

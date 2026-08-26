@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [2.4.5] - 2026-08-26
+
+### Fixed
+- Streaming readers now report the end of the current result set as soon as Netezza sends `CommandComplete`, without waiting for the later `ReadyForQuery`. Call `nextResult()` to advance to another row-returning result, or `close()` to drain the remaining protocol messages and release the connection.
+- Async iteration now closes and drains streaming readers automatically after natural completion, releasing the connection for the next command.
+- SQL parameter substitution now ignores placeholders inside quoted strings, identifiers, comments, and dollar-quoted bodies.
+- Length-prefixed protocol fields and DBOS row bounds are validated defensively; malformed responses poison the connection and require reconnecting instead of allowing an unsafe connection to return to a pool.
+- Legacy Netezza authentication errors returned as NUL-terminated text are now surfaced as database errors while malformed binary response lengths remain rejected.
+- Pool shutdown and handshake/connection timeout races now reject pending checkouts and cannot resurrect removed clients.
+- CI now tests Node.js 18, 20, and 22 and reports coverage for the offline unit suite.
+
 ## [2.4.4] - 2026-08-19
 
 ### Fixed

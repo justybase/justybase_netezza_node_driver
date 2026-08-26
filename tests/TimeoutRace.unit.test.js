@@ -140,6 +140,31 @@ describe('NzConnection timeout cleanup', () => {
         expect(sock.listenerCount('end')).toBe(0);
     });
 
+    test('execute timeout rejects promptly and close() waits for the abandoned execution', async () => {
+        const connection = createConnection();
+        const sock = new FakeSocket();
+        connection._socket = sock;
+        connection._stream = sock;
+        connection._connected = true;
+        connection.commandTimeout = 0.05; // 50 ms
+        connection._backendProcessId = 0;
+        connection._backendSecretKey = 0;
+
+        const started = Date.now();
+        const command = connection.createCommand('SELECT 1');
+        await expect(command.execute()).rejects.toThrow('Command execution timeout');
+        expect(Date.now() - started).toBeLessThan(500);
+
+        await connection.close();
+        expect(connection._stream).toBeNull();
+        expect(connection._socket).toBeNull();
+        expect(connection._executing).toBe(false);
+        expect(sock.listenerCount('readable')).toBe(0);
+        expect(sock.listenerCount('close')).toBe(0);
+        expect(sock.listenerCount('error')).toBe(0);
+        expect(sock.listenerCount('end')).toBe(0);
+    });
+
     test('close() with a live socket waits for the async close and still unwinds cleanly', async () => {
         const connection = createConnection();
         const sock = new AsyncCloseSocket();

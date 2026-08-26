@@ -22,10 +22,10 @@ module.exports = {
         '/dist/',
     ],
     moduleNameMapper: {},
-    collectCoverageFrom: [
-        'src/**/*.ts',
-        '!src/**/*.d.ts',
-    ],
+    // Tests intentionally load the built CommonJS package. Measure the code
+    // that the package actually executes; Jest has no TypeScript transformer.
+    collectCoverageFrom: ['dist/cjs/**/*.js'],
+    coverageProvider: 'v8',
     verbose: true,
     bail: 0,
     clearMocks: true,

@@ -17,6 +17,11 @@ import { substituteParameters } from './protocol/sqlParameters';
 import { parseConnectionString } from './connectionString';
 import { ExternalTableHandler, ExternalTableIO } from './external/ExternalTableHandler';
 import { normalizeClientType } from './clientTypes';
+import {
+    NzProtocolError,
+    validateProtocolLength,
+    validateProtocolLengthAfterOverhead,
+} from './protocol/ProtocolLength';
 import createDebug from 'debug';
 
 const debug = createDebug('nz:connection');
@@ -118,6 +123,7 @@ class NzConnection extends EventEmitter {
     /** Incremented on every command execution. Used to detect stale timeout-cancel calls. */
     private _commandGeneration: number = 0;
     private _connected: boolean = false;
+    private _protocolFaulted: boolean = false;
     private _closing: boolean = false;
     private _rowDescription: ColumnInfo[] | null = null;
     private _textColumnParsers: TextValueParser[] | null = null;
@@ -503,8 +509,19 @@ class NzConnection extends EventEmitter {
     }
 
     private _assertCanExecute(): void {
+        if (this._protocolFaulted) {
+            throw new Error('Connection protocol is invalid; reconnect is required');
+        }
         if (this._closing || !this._connected || !this._stream) {
             throw new Error('Connection is closed');
+        }
+    }
+
+    private _markProtocolFault(): void {
+        this._protocolFaulted = true;
+        this._connected = false;
+        if (this._socket && !this._socket.destroyed) {
+            this._socket.destroy();
         }
     }
 
@@ -578,11 +595,13 @@ class NzConnection extends EventEmitter {
     }
 
     private async _skipBytes(n: number): Promise<void> {
+        validateProtocolLength(n, 'buffer skip');
         await this._ensureBufferData(n);
         this._intBufStart += n;
     }
 
     private async _readBytes(n: number): Promise<Buffer> {
+        validateProtocolLength(n, 'buffer read');
         this._diag.readBytesCalls = (this._diag.readBytesCalls || 0) + 1;
         this._diag.readBytesBytes = (this._diag.readBytesBytes || 0) + n;
         if (this._intBufEnd - this._intBufStart >= n) {
@@ -784,11 +803,11 @@ class NzConnection extends EventEmitter {
         return true;
     }
 
-    private _protocolSyncError(context: string, detail: string): Error {
+    private _protocolSyncError(context: string, detail: string): NzProtocolError {
         const preview = String(context || '')
             .replace(/\s+/g, ' ')
             .slice(0, 80);
-        return new Error(
+        return new NzProtocolError(
             `Connection protocol out of sync before executing "${preview}": ${detail}. Reconnect required.`
         );
     }
@@ -835,6 +854,29 @@ class NzConnection extends EventEmitter {
             if (!(await this._waitForOrphanedBytes(4, deadline))) {
                 throw this._protocolSyncError(context, `truncated orphaned header for type 0x${type.toString(16)}`);
             }
+
+            // RowStandard has the shared four-byte response header followed by
+            // an eight-byte DBOS header. The shared header is not a total frame
+            // length (the appliance commonly sends 1 there), so only the DBOS
+            // row length can be used to determine how many bytes to drain.
+            if (type === BackendMessageCode.RowStandard) {
+                await this._skipBytes(4);
+                if (!(await this._waitForOrphanedBytes(8, deadline))) {
+                    throw this._protocolSyncError(context, 'truncated orphaned RowStandard header');
+                }
+                const rowLength = this._intBuf.readInt32BE(this._intBufStart + 4);
+                try {
+                    validateProtocolLength(rowLength, 'orphanedRowStandardPayload', { allowZero: false });
+                } catch {
+                    throw this._protocolSyncError(context, `invalid orphaned RowStandard rowLength=${rowLength}`);
+                }
+                if (!(await this._waitForOrphanedBytes(rowLength, deadline))) {
+                    throw this._protocolSyncError(context, 'truncated orphaned RowStandard payload');
+                }
+                await this._skipBytes(8 + rowLength);
+                continue;
+            }
+
             await this._skipBytes(4);
 
             if (type === BackendMessageCode.ReadyForQuery || type === BackendMessageCode.ReadyForQueryAlt) {
@@ -847,23 +889,6 @@ class NzConnection extends EventEmitter {
                 type === BackendMessageCode.ControlZero ||
                 type === BackendMessageCode.ControlA
             ) {
-                continue;
-            }
-
-            // Binary row: after the 4-byte header skip, payload is 8 + rowLength (same as _resReadDbosTuple).
-            if (type === BackendMessageCode.RowStandard) {
-                if (!(await this._waitForOrphanedBytes(8, deadline))) {
-                    throw this._protocolSyncError(context, 'truncated orphaned RowStandard header');
-                }
-                const rowLength = this._intBuf.readInt32BE(this._intBufStart + 4);
-                if (rowLength < 0 || rowLength > 10_000_000) {
-                    throw this._protocolSyncError(context, `invalid orphaned RowStandard rowLength=${rowLength}`);
-                }
-                const total = 8 + rowLength;
-                if (!(await this._waitForOrphanedBytes(total, deadline))) {
-                    throw this._protocolSyncError(context, 'truncated orphaned RowStandard payload');
-                }
-                await this._skipBytes(total);
                 continue;
             }
 
@@ -880,7 +905,9 @@ class NzConnection extends EventEmitter {
                     throw this._protocolSyncError(context, `truncated orphaned length for type 0x${type.toString(16)}`);
                 }
                 const len = await this._readInt32();
-                if (len < 0 || len > 10_000_000) {
+                try {
+                    validateProtocolLength(len, 'orphanedPayload');
+                } catch {
                     throw this._protocolSyncError(
                         context,
                         `invalid orphaned length=${len} for type 0x${type.toString(16)}`
@@ -906,7 +933,9 @@ class NzConnection extends EventEmitter {
                 );
             }
             const len = await this._readInt32();
-            if (len < 0 || len > 10_000_000) {
+            try {
+                validateProtocolLength(len, 'orphanedUnknownPayload');
+            } catch {
                 throw this._protocolSyncError(
                     context,
                     `invalid orphaned length=${len} for unknown type 0x${type.toString(16)}`
@@ -946,6 +975,7 @@ class NzConnection extends EventEmitter {
     }
 
     private async _ensureBufferData(n: number): Promise<void> {
+        validateProtocolLength(n, 'buffer read');
         if (this._intBufEnd - this._intBufStart >= n) return;
 
         if (this._intBuf.length - this._intBufStart < n) {
@@ -1055,6 +1085,9 @@ class NzConnection extends EventEmitter {
             }
             if (error) throw error;
             return true;
+        } catch (err) {
+            if (err instanceof NzProtocolError) this._markProtocolFault();
+            throw err;
         } finally {
             this._executing = false;
         }
@@ -1176,6 +1209,7 @@ class NzConnection extends EventEmitter {
                 initialNextItem as GeneratorItem | null
             );
         } catch (e) {
+            if (e instanceof NzProtocolError) this._markProtocolFault();
             this._executing = false;
             throw e;
         }
@@ -1192,6 +1226,15 @@ class NzConnection extends EventEmitter {
     }
 
     private async *_responseGenerator(command: NzCommand): AsyncGenerator<ResponseMessage> {
+        try {
+            yield* this._responseGeneratorCore(command);
+        } catch (err) {
+            if (err instanceof NzProtocolError) this._markProtocolFault();
+            throw err;
+        }
+    }
+
+    private async *_responseGeneratorCore(command: NzCommand): AsyncGenerator<ResponseMessage> {
         this._rows = [];
         this._rowDescription = null;
         this._textColumnParsers = null;
@@ -1243,7 +1286,13 @@ class NzConnection extends EventEmitter {
             if (type === 'e'.charCodeAt(0)) {
                 await this._readBytes(4);
                 const len = PGUtil.readInt32(await this._readBytes(4));
-                const logDirBuf = await this._readBytes(len - 1);
+                const logDirLength = validateProtocolLengthAfterOverhead(
+                    len,
+                    1,
+                    'fileTransfer.logDirectoryLength',
+                    'fileTransfer.logDirectoryPayloadLength'
+                );
+                const logDirBuf = await this._readBytes(logDirLength);
                 const logDir = logDirBuf.toString('utf8');
                 await this._readBytes(1); // null terminator
 
@@ -1264,10 +1313,23 @@ class NzConnection extends EventEmitter {
                 continue;
             }
 
+            if (type === BackendMessageCode.RowStandard) {
+                await this._skipBytes(4);
+                const row = await this._resReadDbosTuple(command);
+                // Try batch-read more rows from internal buffer while data is hot
+                if (!this._batchRowCache) {
+                    this._batchRowCache = this._tryReadDbosBatch();
+                }
+                this._diag.generatorYields = (this._diag.generatorYields || 0) + 1;
+                this._diag.generatorYieldsDataRow = (this._diag.generatorYieldsDataRow || 0) + 1;
+                yield { type: 'DataRow', row };
+                continue;
+            }
+
             await this._skipBytes(4);
 
             if (type === BackendMessageCode.CommandComplete) {
-                const len = await this._readInt32();
+                const len = validateProtocolLength(await this._readInt32(), 'commandCompletePayload');
                 const data = await this._readBytes(len);
                 const commandText = data.toString('utf8');
                 debug('CommandComplete:', commandText);
@@ -1295,13 +1357,13 @@ class NzConnection extends EventEmitter {
             }
 
             if (type === BackendMessageCode.BackendPayloadP) {
-                const len = await this._readInt32();
+                const len = validateProtocolLength(await this._readInt32(), 'backendPayloadP');
                 await this._readBytes(len);
                 continue;
             }
 
             if (type === BackendMessageCode.ErrorResponse) {
-                const len = await this._readInt32();
+                const len = validateProtocolLength(await this._readInt32(), 'errorResponsePayload');
                 const data = await this._readBytes(len);
                 const err = createNzDatabaseError(data);
                 yield { type: 'ErrorResponse', message: err.message, error: err };
@@ -1309,7 +1371,7 @@ class NzConnection extends EventEmitter {
             }
 
             if (type === BackendMessageCode.RowDescription) {
-                const len = await this._readInt32();
+                const len = validateProtocolLength(await this._readInt32(), 'rowDescriptionPayload');
                 const data = await this._readBytes(len);
                 this._parseRowDescription(data, command);
                 this._diag.generatorYields = (this._diag.generatorYields || 0) + 1;
@@ -1320,7 +1382,7 @@ class NzConnection extends EventEmitter {
 
             if (type === BackendMessageCode.DataRow) {
                 this._diag.textParseDataRowCalls = (this._diag.textParseDataRowCalls || 0) + 1;
-                const len = await this._readInt32();
+                const len = validateProtocolLength(await this._readInt32(), 'dataRowPayload');
                 const data = await this._readBytes(len);
                 const row = this._parseDataRow(data);
                 this._diag.generatorYields = (this._diag.generatorYields || 0) + 1;
@@ -1330,7 +1392,7 @@ class NzConnection extends EventEmitter {
             }
 
             if (type === BackendMessageCode.RowDescriptionStandard) {
-                const len = await this._readInt32();
+                const len = validateProtocolLength(await this._readInt32(), 'rowDescriptionStandardPayload');
                 const data = await this._readBytes(len);
                 this._tupdesc.parse(data, command._cachedRowDescription);
                 this._binaryFieldParsers = this._buildBinaryFieldParsers();
@@ -1338,20 +1400,8 @@ class NzConnection extends EventEmitter {
                 continue;
             }
 
-            if (type === BackendMessageCode.RowStandard) {
-                const row = await this._resReadDbosTuple(command);
-                // Try batch-read more rows from internal buffer while data is hot
-                if (!this._batchRowCache) {
-                    this._batchRowCache = this._tryReadDbosBatch();
-                }
-                this._diag.generatorYields = (this._diag.generatorYields || 0) + 1;
-                this._diag.generatorYieldsDataRow = (this._diag.generatorYieldsDataRow || 0) + 1;
-                yield { type: 'DataRow', row };
-                continue;
-            }
-
             if (type === BackendMessageCode.NoticeResponse) {
-                const len = await this._readInt32();
+                const len = validateProtocolLength(await this._readInt32(), 'noticeResponsePayload');
                 const data = await this._readBytes(len);
                 const message = data.toString('utf8').replace(/\0/g, '').trim();
                 debug(`Notice: ${message}`);
@@ -1361,12 +1411,8 @@ class NzConnection extends EventEmitter {
             }
 
             debug('Unknown message:', '0x' + type.toString(16));
-            try {
-                const len = await this._readInt32();
-                if (len > 0 && len < 10000000) await this._readBytes(len);
-            } catch {
-                /* ignore */
-            }
+            const len = validateProtocolLength(await this._readInt32(), 'unknownMessagePayload');
+            if (len > 0) await this._readBytes(len);
         }
     }
 
@@ -1374,23 +1420,30 @@ class NzConnection extends EventEmitter {
         debug('parseRowDescription data length:', data.length, 'hex:', data.toString('hex').substring(0, 100));
         let offset = 0;
         if (data.length < 2) {
-            debug('Data too short for row description');
-            return;
+            throw new NzProtocolError(
+                'Invalid RowDescription payload: column count is truncated; reconnect is required.'
+            );
         }
-        const count = data.readInt16BE(offset);
+        const count = data.readUInt16BE(offset);
         offset += 2;
         debug('Column count:', count);
         this._rowDescription = [];
 
-        for (let i = 0; i < count && offset < data.length; i++) {
+        for (let i = 0; i < count; i++) {
             const nameStart = offset;
             while (offset < data.length && data[offset] !== 0) offset++;
+            if (offset >= data.length) {
+                throw new NzProtocolError(
+                    `Invalid RowDescription payload: column ${i} name is not terminated; reconnect is required.`
+                );
+            }
             const name = data.toString('utf8', nameStart, offset);
             offset++;
 
             if (offset + 11 > data.length) {
-                debug('Not enough data for column', i, 'at offset', offset, 'need 11 more, have', data.length - offset);
-                break;
+                throw new NzProtocolError(
+                    `Invalid RowDescription payload: column ${i} metadata is truncated; reconnect is required.`
+                );
             }
 
             const typeOid = data.readInt32BE(offset);
@@ -1418,8 +1471,14 @@ class NzConnection extends EventEmitter {
     }
 
     private _parseDataRow(data: Buffer): unknown[] {
-        const numberOfCol = this._rowDescription!.length;
+        if (!this._rowDescription) {
+            throw new NzProtocolError('Invalid DataRow sequence: row description is missing; reconnect is required.');
+        }
+        const numberOfCol = this._rowDescription.length;
         const bitmapLen = Math.ceil(numberOfCol / 8);
+        if (data.length < bitmapLen) {
+            throw new NzProtocolError('Invalid DataRow payload: null bitmap is truncated; reconnect is required.');
+        }
         let dataIdx = bitmapLen;
         const row = new Array(numberOfCol);
 
@@ -1433,11 +1492,22 @@ class NzConnection extends EventEmitter {
                 continue;
             }
 
+            if (dataIdx + 4 > data.length) {
+                throw new NzProtocolError(
+                    `Invalid DataRow payload: column ${columnNumber} length is truncated; reconnect is required.`
+                );
+            }
             const vlen = data.readInt32BE(dataIdx);
             dataIdx += 4;
             const actualLen = vlen - 4;
 
-            if (actualLen <= 0) {
+            if (vlen < 4 || actualLen > data.length - dataIdx) {
+                throw new NzProtocolError(
+                    `Invalid DataRow payload: column ${columnNumber} value length is invalid; reconnect is required.`
+                );
+            }
+
+            if (actualLen === 0) {
                 row[columnNumber] = null;
                 continue;
             }
@@ -1466,28 +1536,52 @@ class NzConnection extends EventEmitter {
         // In-place parsing: read from _intBuf directly without copying
         await this._ensureBufferData(8);
         const rowLength = this._intBuf.readInt32BE(this._intBufStart + 4);
+        validateProtocolLength(rowLength, 'rowStandardPayload', { allowZero: false });
         const totalMsg = 8 + rowLength;
         await this._ensureBufferData(totalMsg);
-        const row = this._parseDbosRowInPlace(this._intBuf, this._intBufStart + 8);
+        const row = this._parseDbosRowInPlace(this._intBuf, this._intBufStart + 8, this._intBufStart + totalMsg);
         this._intBufStart += totalMsg;
         return row;
     }
 
     private _parseDbosRow(data: Buffer): unknown[] {
-        return this._parseDbosRowInPlace(data, 0);
+        return this._parseDbosRowInPlace(data, 0, data.length);
     }
 
-    private _parseDbosRowInPlace(buffer: Buffer, baseOffset: number): unknown[] {
+    private _parseDbosRowInPlace(buffer: Buffer, baseOffset: number, endOffset: number = buffer.length): unknown[] {
         const numFields = this._tupdesc.numFields;
         const parsers = this._binaryFieldParsers;
         const row = new Array(numFields);
         this._diag.parseDbosRowCalls = (this._diag.parseDbosRowCalls || 0) + 1;
+
+        if (
+            !Number.isInteger(baseOffset) ||
+            !Number.isInteger(endOffset) ||
+            baseOffset < 0 ||
+            endOffset < baseOffset ||
+            endOffset > buffer.length
+        ) {
+            throw new NzProtocolError(
+                'Invalid RowStandard payload: row bounds are outside the frame; reconnect is required.'
+            );
+        }
+
+        if (!Number.isInteger(numFields) || numFields < 0) {
+            throw new NzProtocolError(
+                'Invalid RowStandard payload: descriptor field count is invalid; reconnect is required.'
+            );
+        }
 
         // Pre-compute variable field offsets once per row (O(n) instead of O(n²))
         const numVaryingFields = this._tupdesc.numVaryingFields ?? 0;
         const fixedFieldsSize = this._tupdesc.fixedFieldsSize;
         let varFieldStarts: number[] | null = null;
         if (numVaryingFields > 0) {
+            if (!Number.isInteger(fixedFieldsSize) || fixedFieldsSize < 0) {
+                throw new NzProtocolError(
+                    'Invalid RowStandard payload: fixed-field area offset is invalid; reconnect is required.'
+                );
+            }
             if (this._varOffsetsScratch.length < numVaryingFields) {
                 this._varOffsetsScratch = new Array(numVaryingFields);
             }
@@ -1495,15 +1589,30 @@ class NzConnection extends EventEmitter {
             this._diag.parseDbosRowVarOffsetsAlloc = (this._diag.parseDbosRowVarOffsetsAlloc || 0) + 1;
             let voff = baseOffset + fixedFieldsSize;
             for (let j = 0; j < numVaryingFields; j++) {
+                if (voff < baseOffset || voff + 2 > endOffset) {
+                    throw new NzProtocolError(
+                        `Invalid RowStandard payload: varying field ${j} length prefix is truncated; reconnect is required.`
+                    );
+                }
                 varFieldStarts[j] = voff;
                 const vlen = buffer.readUInt16LE(voff);
+                if (vlen < 2 || voff + vlen > endOffset) {
+                    throw new NzProtocolError(
+                        `Invalid RowStandard payload: varying field ${j} length is invalid; reconnect is required.`
+                    );
+                }
                 voff += vlen;
                 if (vlen % 2 !== 0) voff += 1;
+                if (voff > endOffset) {
+                    throw new NzProtocolError(
+                        `Invalid RowStandard payload: varying field ${j} padding is truncated; reconnect is required.`
+                    );
+                }
             }
         }
 
         for (let i = 0; i < numFields; i++) {
-            if (this._columnIsNullInPlace(buffer, baseOffset, i)) {
+            if (this._columnIsNullInPlace(buffer, baseOffset, i, endOffset)) {
                 row[i] = null;
                 continue;
             }
@@ -1511,11 +1620,49 @@ class NzConnection extends EventEmitter {
             let fieldStart: number;
             const fixedSize = this._tupdesc.fieldFixedSize[i];
             if (fixedSize !== 0) {
-                fieldStart = baseOffset + this._tupdesc.fieldOffset[i];
+                if (!Number.isInteger(fixedSize) || fixedSize < 0) {
+                    throw new NzProtocolError(
+                        `Invalid RowStandard payload: fixed field ${i} size is invalid; reconnect is required.`
+                    );
+                }
+                const fieldOffset = this._tupdesc.fieldOffset[i];
+                if (!Number.isInteger(fieldOffset) || fieldOffset < 0) {
+                    throw new NzProtocolError(
+                        `Invalid RowStandard payload: fixed field ${i} offset is invalid; reconnect is required.`
+                    );
+                }
+                fieldStart = baseOffset + fieldOffset;
+                if (fieldStart < baseOffset || fieldStart + fixedSize > endOffset) {
+                    throw new NzProtocolError(
+                        `Invalid RowStandard payload: fixed field ${i} extends beyond the row; reconnect is required.`
+                    );
+                }
             } else if (varFieldStarts) {
-                fieldStart = varFieldStarts[this._tupdesc.fieldOffset[i]];
+                const varIndex = this._tupdesc.fieldOffset[i];
+                if (!Number.isInteger(varIndex) || varIndex < 0 || varIndex >= numVaryingFields) {
+                    throw new NzProtocolError(
+                        `Invalid RowStandard payload: varying field ${i} index is invalid; reconnect is required.`
+                    );
+                }
+                fieldStart = varFieldStarts[varIndex];
+                const encodedLength = buffer.readUInt16LE(fieldStart);
+                if (encodedLength < 2 || fieldStart + encodedLength > endOffset) {
+                    throw new NzProtocolError(
+                        `Invalid RowStandard payload: varying field ${i} extends beyond the row; reconnect is required.`
+                    );
+                }
             } else {
+                if (!Number.isInteger(fixedFieldsSize) || fixedFieldsSize < 0) {
+                    throw new NzProtocolError(
+                        'Invalid RowStandard payload: fixed-field area offset is invalid; reconnect is required.'
+                    );
+                }
                 fieldStart = baseOffset + fixedFieldsSize;
+                if (fieldStart < baseOffset || fieldStart > endOffset) {
+                    throw new NzProtocolError(
+                        `Invalid RowStandard payload: field ${i} starts outside the row; reconnect is required.`
+                    );
+                }
             }
 
             const parser = parsers?.[i];
@@ -1531,18 +1678,28 @@ class NzConnection extends EventEmitter {
         return row;
     }
 
-    private _columnIsNullInPlace(buffer: Buffer, baseOffset: number, fieldLf: number): boolean {
+    private _columnIsNullInPlace(
+        buffer: Buffer,
+        baseOffset: number,
+        fieldLf: number,
+        endOffset: number = buffer.length
+    ): boolean {
         if (!this._tupdesc.nullsAllowed) return false;
         const byteOffset = baseOffset + this._tupdesc.fieldNullByteOffset[fieldLf];
         const bitMask = this._tupdesc.fieldNullBitMask[fieldLf];
+        if (byteOffset < baseOffset || byteOffset >= endOffset) {
+            throw new NzProtocolError(
+                `Invalid RowStandard payload: null bitmap for field ${fieldLf} is truncated; reconnect is required.`
+            );
+        }
         return (buffer[byteOffset] & bitMask) !== 0;
     }
 
     /**
      * Try to read additional DBOS rows from the internal buffer.
      * Called after the first row is read, to batch-process remaining rows
-     * without per-row async overhead.
-     * Validates rowLen against msgLen to detect data corruption.
+     * without per-row async overhead. The shared RowStandard header is not a
+     * total frame length, so the DBOS row length controls the boundary.
      */
     private _tryReadDbosBatch(): unknown[][] {
         const rows: unknown[][] = [];
@@ -1556,24 +1713,19 @@ class NzConnection extends EventEmitter {
             // Next byte should be 'Y' (RowStandard)
             if (this._intBuf[this._intBufStart] !== 89) break;
 
-            // We need: type(1) + msgLen(4) to compute total message size
-            if (available < 5) break;
-            const msgLen = this._intBuf.readInt32BE(this._intBufStart + 1);
-            const totalMsg = 1 + 4 + msgLen;
-            if (available < totalMsg) break;
-
-            if (msgLen < 8) break;
-
+            // A RowStandard frame is: type + shared header + DBOS header + row.
+            // The shared header is not a total length; the row length is the
+            // second int32 in the DBOS header.
+            if (available < 13) break;
             const payloadStart = this._intBufStart + 5;
-            const payloadEnd = payloadStart + msgLen;
-            if (payloadEnd > this._intBufEnd) break;
-
             const rowLen = this._intBuf.readInt32BE(payloadStart + 4);
-            if (rowLen <= 0 || 8 + rowLen !== msgLen) break;
+            validateProtocolLength(rowLen, 'rowStandardPayload', { allowZero: false });
+            const payloadEnd = payloadStart + 8 + rowLen;
+            if (payloadEnd > this._intBufEnd) break;
 
             // In-place parse without subarray
             const dataStart = payloadStart + 8;
-            rows.push(this._parseDbosRowInPlace(this._intBuf, dataStart));
+            rows.push(this._parseDbosRowInPlace(this._intBuf, dataStart, payloadEnd));
 
             this._intBufStart = payloadEnd;
         }

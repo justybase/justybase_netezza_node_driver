@@ -102,6 +102,7 @@ class NzDataReader {
     private _pendingColumns: ColumnDescription[] | null = null;
     private _pendingNullability: boolean[] | null = null;
     private _isFinished: boolean = false;
+    private _resultComplete: boolean = false;
     private _nextItem: GeneratorItem | null;
     private _hasRows: boolean;
     private _columnNullability: boolean[] | null;
@@ -399,44 +400,24 @@ class NzDataReader {
     }
 
     async nextResult(): Promise<boolean> {
+        if (this.closed || this._isFinished) return false;
+
+        let foundNextResult = false;
         if (this._pendingColumns) {
             this._setColumnState(this._pendingColumns, this._pendingNullability);
             this._pendingColumns = null;
             this._pendingNullability = null;
             this.currentRow = null;
-
-            while (true) {
-                const nextRes = await this.generator.next();
-                if (nextRes.done) {
-                    this._nextItem = null;
-                    this._hasRows = false;
-                    break;
-                }
-                const val = nextRes.value;
-                if (val.type === 'NoticeResponse') {
-                    this.command._notices.push(val.message || '');
-                    continue;
-                } else if (val.type === 'RowDescriptionStandard') {
-                    continue;
-                } else if (val.type === 'DataRow') {
-                    this._nextItem = val;
-                    this._hasRows = true;
-                    break;
-                } else if (val.type === 'CommandComplete') {
-                    this._nextItem = val;
-                    this._hasRows = false;
-                    break;
-                } else {
-                    this._nextItem = val;
-                    this._hasRows = false;
-                    break;
-                }
-            }
-
-            return true;
+            this._resultComplete = false;
+            foundNextResult = true;
         }
 
-        if (this.closed || this._isFinished) return false;
+        // nextResult() may be called before the caller has consumed the current
+        // result. Drain it only as far as CommandComplete, then look for the next
+        // RowDescription. Once read() has already observed CommandComplete there
+        // is nothing left to drain from the current result.
+        let drainingCurrentResult = !foundNextResult && !this._resultComplete;
+        this.currentRow = null;
 
         while (true) {
             let res: IteratorResult<GeneratorItem>;
@@ -456,6 +437,9 @@ class NzDataReader {
             if (val.type === 'RowDescription') {
                 this._setColumnState(val.columns!, null);
                 this.currentRow = null;
+                drainingCurrentResult = false;
+                foundNextResult = true;
+                this._resultComplete = false;
                 continue;
             }
 
@@ -467,16 +451,35 @@ class NzDataReader {
                     this._columnNullability = this._cloneNullability(val.desc?.fieldNullAllowed ?? null);
                 }
                 this.currentRow = null;
+                if (!drainingCurrentResult) {
+                    foundNextResult = true;
+                    this._resultComplete = false;
+                }
                 continue;
             }
 
             if (val.type === 'DataRow') {
+                if (drainingCurrentResult || !foundNextResult) {
+                    continue;
+                }
                 this._nextItem = val;
                 this._hasRows = true;
                 return true;
             }
 
             if (val.type === 'CommandComplete') {
+                if (drainingCurrentResult) {
+                    drainingCurrentResult = false;
+                    this._resultComplete = true;
+                    continue;
+                }
+                if (foundNextResult) {
+                    this._resultComplete = true;
+                    this._hasRows = false;
+                    return true;
+                }
+                // Non-row-returning statements do not form a data reader result
+                // set. Continue until a RowDescription or ReadyForQuery arrives.
                 continue;
             }
 
@@ -554,6 +557,7 @@ class NzDataReader {
 
     async read(): Promise<boolean> {
         if (this.closed || this._isFinished) return false;
+        if (this._resultComplete) return false;
         if (this._pendingColumns) return false;
 
         while (true) {
@@ -594,7 +598,8 @@ class NzDataReader {
 
             if (val.type === 'CommandComplete') {
                 this.currentRow = null;
-                continue;
+                this._resultComplete = true;
+                return false;
             }
 
             if (val.type === 'NoticeResponse') {
@@ -794,8 +799,12 @@ class NzDataReader {
     }
 
     async *[Symbol.asyncIterator](): AsyncGenerator<Record<string, unknown>> {
-        while (await this.read()) {
-            yield this.getRowObject()!;
+        try {
+            while (await this.read()) {
+                yield this.getRowObject()!;
+            }
+        } finally {
+            await this.close();
         }
     }
 }

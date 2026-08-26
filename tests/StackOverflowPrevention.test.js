@@ -4,6 +4,8 @@ const { NzCommand } = require('../dist/cjs/NzCommand');
 // Mock NzCommand for testing
 class MockNzCommand {
     _preparedStatement = null;
+    _cachedRowDescription = null;
+    _notices = [];
 }
 
 /**
@@ -40,22 +42,24 @@ describe('NzDataReader - Stack Overflow Prevention', () => {
             null  // no initial next item
         );
         
-        // This should not throw stack overflow error
+        // read() stops at the first result boundary.
         const result = await reader.read();
-        
-        // After processing all CommandComplete and hitting ReadyForQuery,
-        // read() should return false (no more data)
         expect(result).toBe(false);
         expect(reader.isClosed).toBe(false);
+
+        // nextResult() iteratively skips the remaining non-row results.
+        expect(await reader.nextResult()).toBe(false);
         
         await reader.close();
     }, 30000);
 
-    test('should handle CommandComplete followed by DataRow', async () => {
+    test('should not read across CommandComplete into the next result', async () => {
         const items = [
             { type: 'CommandComplete' },
+            { type: 'RowDescription', columns: [{ name: 'test', typeOid: 23, typeMod: -1, typeLen: 4 }] },
+            { type: 'DataRow', row: [42] },
             { type: 'CommandComplete' },
-            { type: 'DataRow', row: [42] }
+            { type: 'ReadyForQuery' }
         ];
         
         const mockCommand = new MockNzCommand();
@@ -69,19 +73,23 @@ describe('NzDataReader - Stack Overflow Prevention', () => {
             null
         );
         
-        const result = await reader.read();
-        expect(result).toBe(true);
+        expect(await reader.read()).toBe(false);
+        expect(await reader.read()).toBe(false);
+
+        expect(await reader.nextResult()).toBe(true);
+        expect(await reader.read()).toBe(true);
         expect(reader.getValue(0)).toBe(42);
+        expect(await reader.read()).toBe(false);
         
         await reader.close();
     });
 
-    test('should handle interleaved CommandComplete and RowDescription', async () => {
+    test('should expose an empty result set after CommandComplete', async () => {
         const items = [
             { type: 'CommandComplete' },
             { type: 'RowDescription', columns: [{ name: 'col1', typeOid: 23, typeMod: -1, typeLen: 4 }] },
             { type: 'CommandComplete' },
-            { type: 'DataRow', row: [100] }
+            { type: 'ReadyForQuery' }
         ];
         
         const mockCommand = new MockNzCommand();
@@ -95,11 +103,12 @@ describe('NzDataReader - Stack Overflow Prevention', () => {
             null
         );
         
-        // First read should encounter CommandComplete, then RowDescription
-        // RowDescription sets _pendingColumns and returns false
-        const result1 = await reader.read();
-        expect(result1).toBe(false);
-        expect(reader._pendingColumns).not.toBeNull();
+        expect(await reader.read()).toBe(false);
+        expect(await reader.nextResult()).toBe(true);
+        expect(reader.fieldCount).toBe(1);
+        expect(reader.hasRows).toBe(false);
+        expect(await reader.read()).toBe(false);
+        expect(await reader.nextResult()).toBe(false);
         
         await reader.close();
     });

@@ -9,6 +9,11 @@ import { BackendMessageCode, HandshakeCode, ProtocolVersion } from './protocol/c
 import { createNzDatabaseError, NzDatabaseError } from './errors/NzDatabaseError';
 import { SocketTransport } from './transport/SocketTransport';
 import { normalizeClientType } from './clientTypes';
+import {
+    NzProtocolError,
+    validateProtocolLength,
+    validateProtocolLengthAfterOverhead,
+} from './protocol/ProtocolLength';
 import createDebug from 'debug';
 
 const debug = createDebug('nz:handshake');
@@ -386,13 +391,16 @@ class Handshake {
                 try {
                     const lenBuf = await this.readBytes(4);
                     const len = PGUtil.readInt32(lenBuf);
-                    if (len >= 0 && len <= 100000000) {
-                        const body = await this.readBytes(Math.max(0, len - 4));
-                        throw createNzDatabaseError(body);
-                    }
-                    throw createNzDatabaseError(lenBuf);
+                    const bodyLength = validateProtocolLengthAfterOverhead(
+                        len,
+                        4,
+                        'handshakeErrorFrameLength',
+                        'handshakeErrorPayload'
+                    );
+                    const body = await this.readBytes(bodyLength);
+                    throw createNzDatabaseError(body);
                 } catch (e) {
-                    if (e instanceof NzDatabaseError) throw e;
+                    if (e instanceof NzDatabaseError || e instanceof NzProtocolError) throw e;
                     throw new NzDatabaseError({
                         message: 'Handshake V2 Failed: ErrorResponse from backend',
                         raw: 'Handshake V2 Failed: ErrorResponse from backend',
@@ -486,13 +494,27 @@ class Handshake {
                 const lenBuf = await this.readBytes(4);
                 const len = PGUtil.readInt32(lenBuf);
 
-                if (len < 0 || len > 100000000) {
-                    let msg = lenBuf.toString('utf8');
-                    msg += await this.readString();
-                    throw createNzDatabaseError(msg);
+                // Some Netezza versions return a legacy, NUL-terminated text
+                // error here instead of a length-prefixed ErrorResponse body.
+                // The first four characters (for example, "Pass") therefore
+                // look like an absurd frame length when interpreted as int32.
+                // Only accept this compatibility form when all four bytes are
+                // printable ASCII; binary malformed lengths must still fail
+                // closed below.
+                const isLegacyTextPrefix = lenBuf.every((byte) => byte >= 0x20 && byte <= 0x7e);
+                if (isLegacyTextPrefix) {
+                    let legacyMessage = lenBuf.toString('utf8');
+                    legacyMessage += await this.readString();
+                    throw createNzDatabaseError(legacyMessage);
                 }
 
-                const body = await this.readBytes(len - 4);
+                const bodyLength = validateProtocolLengthAfterOverhead(
+                    len,
+                    4,
+                    'connectionCompleteErrorFrameLength',
+                    'connectionCompleteErrorPayload'
+                );
+                const body = await this.readBytes(bodyLength);
                 throw createNzDatabaseError(body);
             }
 
@@ -516,7 +538,10 @@ class Handshake {
                 return true;
             }
             if (beresp === BackendMessageCode.NoticeResponse) {
-                const len = PGUtil.readInt32(await this.readBytes(4));
+                const len = validateProtocolLength(
+                    PGUtil.readInt32(await this.readBytes(4)),
+                    'connectionCompleteNoticePayload'
+                );
                 const body = await this.readBytes(len);
                 debug(`Notice: ${body.toString()}`);
                 continue;

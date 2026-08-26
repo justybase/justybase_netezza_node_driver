@@ -1,6 +1,7 @@
 import { EventEmitter } from 'events';
 import * as net from 'net';
 import * as tls from 'tls';
+import { validateProtocolLength } from '../protocol/ProtocolLength';
 
 export type Stream = net.Socket | tls.TLSSocket;
 
@@ -104,6 +105,7 @@ export class SocketTransport extends EventEmitter {
     }
 
     async readBytes(n: number): Promise<Buffer> {
+        validateProtocolLength(n, 'transport read');
         if (this.diag) {
             this.diag.readBytesCalls = (this.diag.readBytesCalls || 0) + 1;
             this.diag.readBytesBytes = (this.diag.readBytesBytes || 0) + n;

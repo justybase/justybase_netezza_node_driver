@@ -3,6 +3,8 @@
  * Port of C# DbosTupleDesc.cs
  */
 
+import { NzProtocolError, validateProtocolLength } from './protocol/ProtocolLength';
+
 interface CachedRowDescription {
     description?: Array<{ typeOid: number }>;
 }
@@ -60,6 +62,12 @@ class DbosTupleDesc {
     parse(data: Buffer, cachedRowDescription?: CachedRowDescription): void {
         this.clear();
 
+        if (data.length < 36) {
+            throw new NzProtocolError(
+                'Invalid RowDescriptionStandard payload: descriptor header is truncated; reconnect is required.'
+            );
+        }
+
         let idx = 0;
         this.version = data.readInt32BE(idx);
         idx += 4;
@@ -79,6 +87,22 @@ class DbosTupleDesc {
         idx += 4;
         this.numFields = data.readInt32BE(idx);
         idx += 4;
+
+        if (this.numFields < 0 || this.numFields > 100_000) {
+            throw new NzProtocolError(
+                `Invalid RowDescriptionStandard payload: field count ${this.numFields} is out of range; ` +
+                    'reconnect is required.'
+            );
+        }
+
+        const descriptorLength = 36 + this.numFields * 36 + 8;
+        validateProtocolLength(descriptorLength, 'rowDescriptionStandardDescriptor');
+        if (data.length < descriptorLength) {
+            throw new NzProtocolError(
+                `Invalid RowDescriptionStandard payload: expected at least ${descriptorLength} bytes, received ${data.length}; ` +
+                    'reconnect is required.'
+            );
+        }
 
         const NzTypeInt = 3;
         const NzTypeIntvsAbsTimeFIX = 39;
