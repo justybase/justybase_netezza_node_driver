@@ -27,7 +27,7 @@ It allows for direct connection to IBM Netezza / PureData System for Analytics d
 npm install @justybase/netezza-driver
 ```
 
-Requires Node.js **>= 18.18.0**.
+Requires Node.js **>= 22.0.0**.
 
 ## Quick Start
 
@@ -198,7 +198,7 @@ Important: this project is an independent TypeScript implementation and does not
 
 ## Testing
 
-Repository CI runs offline unit tests (`npm run test:unit`) on Node 22.x. Live Netezza smoke/full suites stay local. The published package `engines` field requires `>=18.18.0`.
+Repository CI runs offline unit tests (`npm run test:unit`) on Node 22.x and 24.x. Live Netezza smoke/full suites stay local. The published package `engines` field requires `>=22.0.0`.
 
 ### Environment variables
 

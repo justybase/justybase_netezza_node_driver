@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.0.0] - 2026-08-26
+
+### Breaking
+- Node.js support now starts at `>=22.0.0`; Node.js 18 and 20 are no longer supported.
+
+### Changed
+- CI validates the supported Node.js 22 and 24 LTS lines.
+
 ## [2.4.5] - 2026-08-26
 
 ### Fixed
