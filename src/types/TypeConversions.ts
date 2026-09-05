@@ -71,7 +71,8 @@ export function timeRecvFloat(data: Buffer, offset: number = 0): TimeValue {
  */
 export function parseTimeString(str: string | null): TimeValue | null {
     if (!str) return null;
-    const parts = str.split(':');
+    const timeString = str;
+    const parts = timeString.split(':');
     const hours = parseInt(parts[0], 10) || 0;
     const minutes = parseInt(parts[1], 10) || 0;
     const secParts = (parts[2] || '0').split('.');
@@ -88,7 +89,7 @@ export function parseTimeString(str: string | null): TimeValue | null {
         seconds,
         microseconds,
         toString(): string {
-            return str!;
+            return timeString;
         },
     };
 }
@@ -132,9 +133,9 @@ export function timetzOutput(data: Buffer, fldlen: number, offset: number = 0): 
 
     let tzStr = String(tzHours).padStart(2, '0');
     if (tzSeconds !== 0) {
-        tzStr += ':' + String(tzMinutes).padStart(2, '0') + ':' + String(tzSeconds).padStart(2, '0');
+        tzStr += `:${String(tzMinutes).padStart(2, '0')}:${String(tzSeconds).padStart(2, '0')}`;
     } else if (tzMinutes !== 0) {
-        tzStr += ':' + String(tzMinutes).padStart(2, '0');
+        tzStr += `:${String(tzMinutes).padStart(2, '0')}`;
     }
 
     return `${time.toString()}${tzSign}${tzStr}`;
@@ -413,9 +414,9 @@ export function getCsNumeric(
         if (scale !== 0) {
             const padded = result.padStart(scale + 1, '0');
             const decimalStart = padded.length - scale;
-            result = padded.slice(0, decimalStart) + '.' + padded.slice(decimalStart);
+            result = `${padded.slice(0, decimalStart)}.${padded.slice(decimalStart)}`;
         }
-        if (isMinus) result = '-' + result;
+        if (isMinus) result = `-${result}`;
         const num = parseFloat(result);
         if (prec <= 15 && result === String(num)) {
             return num;
@@ -436,11 +437,11 @@ export function getCsNumeric(
     if (scale !== 0) {
         const padded = result.padStart(scale + 1, '0');
         const decimalStart = padded.length - scale;
-        result = padded.slice(0, decimalStart) + '.' + padded.slice(decimalStart);
+        result = `${padded.slice(0, decimalStart)}.${padded.slice(decimalStart)}`;
     }
 
     if (isMinus) {
-        result = '-' + result;
+        result = `-${result}`;
     }
 
     // Try to return as number if safe

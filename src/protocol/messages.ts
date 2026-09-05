@@ -1,5 +1,5 @@
-import { DbosTupleDesc } from '../DbosTupleDesc';
-import { NzDatabaseError } from '../errors/NzDatabaseError';
+import type { DbosTupleDesc } from '../DbosTupleDesc';
+import type { NzDatabaseError } from '../errors/NzDatabaseError';
 
 export interface ColumnInfo {
     name: string;

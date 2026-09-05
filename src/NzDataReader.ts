@@ -1,4 +1,5 @@
 import type { NzCommand } from './NzCommand';
+import type { QueryResultRow } from './NzConnection';
 import type { TimeValue } from './types/TypeConversions';
 import { NzDatabaseError } from './errors/NzDatabaseError';
 
@@ -87,15 +88,40 @@ const Oid = {
 const TYPE_MOD_OFFSET = 16;
 
 /**
- * Data reader for query results
- * Port of C# NzDataReader.cs
+ * Array-of-column-values representation of a row type, used to type
+ * `currentRow` and `getValues()`.
+ *
+ * - If `TRow` is already an array/tuple type it is kept as-is.
+ * - Otherwise the element type is the union of the row object's property
+ *   values, e.g. `{ id: number; name: string }` maps to `(number | string)[]`.
+ * - The default row type `QueryResultRow` (`Record<string, unknown>`) maps to
+ *   `unknown[]`, preserving the original strict contract.
  */
-class NzDataReader {
+type RowValues<TRow> =
+    TRow extends ReadonlyArray<unknown> ? TRow : TRow extends object ? TRow[keyof TRow][] : unknown[];
+
+/**
+ * Data reader for query results.
+ * Port of C# NzDataReader.cs
+ *
+ * @typeParam TRow - Shape of each row when read as an object via
+ * `getRowObject()` or async iteration, and the source for the typed
+ * column-value arrays in `currentRow` / `getValues()`. Defaults to
+ * `QueryResultRow` (`Record<string, unknown>`). Obtain a typed reader through
+ * `executeReader<MyRow>()` on a connection or `NzCommand`, or supply a row
+ * shape per call with `getRowObject<MyRow>()`.
+ */
+class NzDataReader<TRow = QueryResultRow> {
     command: NzCommand;
     generator: AsyncGenerator<GeneratorItem>;
     columnDescriptions: ColumnDescription[];
     releaseCallback: (() => void) | null;
-    currentRow: unknown[] | null = null;
+    /**
+     * The current row's column values, typed through the reader's `TRow`.
+     * `null` when there is no current row. Prefer the typed getters
+     * (`getString(i)`, `getValue(i)`, ...) over direct access.
+     */
+    currentRow: RowValues<TRow> | null = null;
     closed: boolean = false;
 
     private _nameIndex: Record<string, number> = {};
@@ -435,7 +461,7 @@ class NzDataReader {
             const val = res.value;
 
             if (val.type === 'RowDescription') {
-                this._setColumnState(val.columns!, null);
+                this._setColumnState(val.columns as ColumnDescription[], null);
                 this.currentRow = null;
                 drainingCurrentResult = false;
                 foundNextResult = true;
@@ -577,12 +603,12 @@ class NzDataReader {
 
             const val = res.value;
             if (val.type === 'DataRow') {
-                this.currentRow = val.row!;
+                this.currentRow = val.row as unknown as RowValues<TRow>;
                 return true;
             }
 
             if (val.type === 'RowDescription') {
-                this._pendingColumns = val.columns!;
+                this._pendingColumns = val.columns as ColumnDescription[];
                 this._pendingNullability = null;
                 this.currentRow = null;
                 return false;
@@ -590,7 +616,7 @@ class NzDataReader {
 
             if (val.type === 'RowDescriptionStandard') {
                 const ps = this.command._cachedRowDescription;
-                this._pendingColumns = ps && ps.description ? ps.description : this.columnDescriptions;
+                this._pendingColumns = ps?.description ? ps.description : this.columnDescriptions;
                 this._pendingNullability = this._cloneNullability(val.desc?.fieldNullAllowed ?? null);
                 this.currentRow = null;
                 return false;
@@ -618,14 +644,12 @@ class NzDataReader {
                 this.currentRow = null;
                 return false;
             }
-
-            continue;
         }
     }
 
     getValue(i: number): unknown {
         this._validateOrdinal(i);
-        return this.currentRow![i];
+        return (this.currentRow as RowValues<TRow>)[i];
     }
 
     getValueByName(name: string): unknown {
@@ -658,7 +682,7 @@ class NzDataReader {
 
     isDBNull(i: number): boolean {
         this._validateOrdinal(i);
-        return this.currentRow![i] === null;
+        return (this.currentRow as RowValues<TRow>)[i] === null;
     }
 
     getBoolean(i: number): boolean {
@@ -712,7 +736,7 @@ class NzDataReader {
         const val = this.getValue(i);
         if (val === null) return null;
         if (typeof val === 'string') return val;
-        if (val && val.toString) return val.toString();
+        if (val?.toString) return val.toString();
         return String(val);
     }
 
@@ -745,18 +769,43 @@ class NzDataReader {
         return val;
     }
 
-    getRowObject(): Record<string, unknown> | null {
+    /**
+     * Get the current row as an object keyed by column name.
+     *
+     * The returned object is typed as `Row`, which defaults to this reader's
+     * row shape `TRow` (`QueryResultRow` unless a typed reader was requested):
+     *
+     * ```typescript
+     * const row = reader.getRowObject<{ TABLENAME: string }>();
+     * ```
+     *
+     * @returns The current row, or `null` when there is no current row.
+     */
+    getRowObject<Row = TRow>(): Row | null {
         if (!this.currentRow) return null;
         const obj: Record<string, unknown> = {};
         for (let i = 0; i < this._columnNames.length; i++) {
             obj[this._columnNames[i]] = this.currentRow[i];
         }
-        return obj;
+        return obj as unknown as Row;
     }
 
-    getValues(): unknown[] {
-        if (!this.currentRow) return [];
-        return [...this.currentRow];
+    /**
+     * Copy of the current row's column values in ordinal order.
+     *
+     * The element type is derived from the reader's row shape `TRow` (see
+     * `RowValues`): `unknown[]` by default. A per-call override is available:
+     *
+     * ```typescript
+     * const values = reader.getValues<[string, number]>();
+     * ```
+     *
+     * @returns The current row values, or an empty array when there is no
+     * current row.
+     */
+    getValues<V extends ReadonlyArray<unknown> = RowValues<TRow>>(): V {
+        if (!this.currentRow) return [] as unknown as V;
+        return [...this.currentRow] as unknown as V;
     }
 
     async close(): Promise<void> {
@@ -798,10 +847,17 @@ class NzDataReader {
         }
     }
 
-    async *[Symbol.asyncIterator](): AsyncGenerator<Record<string, unknown>> {
+    /**
+     * Async iteration over the remaining rows as objects keyed by column name.
+     * The reader is drained and closed automatically after natural completion.
+     *
+     * Yields this reader's row shape `TRow`; create the reader with
+     * `executeReader<MyRow>()` to make `for await` fully typed.
+     */
+    async *[Symbol.asyncIterator](): AsyncGenerator<TRow> {
         try {
             while (await this.read()) {
-                yield this.getRowObject()!;
+                yield this.getRowObject() as TRow;
             }
         } finally {
             await this.close();
@@ -809,4 +865,4 @@ class NzDataReader {
     }
 }
 
-export { NzDataReader, ColumnDescription, ColumnMetadata, GeneratorItem };
+export { NzDataReader, type ColumnDescription, type ColumnMetadata, type GeneratorItem };

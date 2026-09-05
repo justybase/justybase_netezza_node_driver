@@ -1,21 +1,21 @@
-import * as net from 'net';
-import * as tls from 'tls';
-import type { WriteStream } from 'fs';
-import { Readable } from 'stream';
-import { EventEmitter } from 'events';
+import * as net from 'node:net';
+import type * as tls from 'node:tls';
+import type { WriteStream } from 'node:fs';
+import type { Readable } from 'node:stream';
+import { EventEmitter } from 'node:events';
 import { Handshake } from './Handshake';
 import { PGUtil } from './utils/PGUtil';
 import { NzCommand } from './NzCommand';
-import { NzDataReader, GeneratorItem, ColumnDescription } from './NzDataReader';
+import { NzDataReader, type GeneratorItem, type ColumnDescription } from './NzDataReader';
 import { DbosTupleDesc } from './DbosTupleDesc';
 import { BackendMessageCode, NzType } from './protocol/constants';
 import { buildSimpleQueryPacket } from './protocol/QueryExecutor';
-import { ColumnInfo, ResponseMessage } from './protocol/messages';
+import type { ColumnInfo, ResponseMessage } from './protocol/messages';
 import * as TypeConversions from './types/TypeConversions';
 import { createNzDatabaseError } from './errors/NzDatabaseError';
 import { substituteParameters } from './protocol/sqlParameters';
 import { parseConnectionString } from './connectionString';
-import { ExternalTableHandler, ExternalTableIO } from './external/ExternalTableHandler';
+import { ExternalTableHandler, type ExternalTableIO } from './external/ExternalTableHandler';
 import { normalizeClientType } from './clientTypes';
 import {
     NzProtocolError,
@@ -39,7 +39,7 @@ const debug = createDebug('nz:connection');
  */
 function parseCommandCompleteRows(commandText: string): number {
     // Remove trailing null byte and trim whitespace
-    const cleanText = commandText.replace(/\x00/g, '').trim();
+    const cleanText = commandText.split('\0').join('').trim();
 
     // Split by whitespace
     const values = cleanText.split(/\s+/);
@@ -52,7 +52,7 @@ function parseCommandCompleteRows(commandText: string): number {
         // Take the last value as row count (same as C#: values[^1])
         const lastValue = values[values.length - 1];
         const parsed = parseInt(lastValue, 10);
-        if (!isNaN(parsed)) {
+        if (!Number.isNaN(parsed)) {
             return parsed;
         }
     }
@@ -87,8 +87,20 @@ export interface NzConnectionConfig {
     clientType?: number;
 }
 
-export interface QueryResult {
-    rows: Record<string, unknown>[];
+/** A single row returned by a buffered `query()`. Values are `unknown` until narrowed. */
+export type QueryResultRow = Record<string, unknown>;
+
+/**
+ * Result of a buffered `query()` call.
+ *
+ * `rows` is typed as `T[]`. By default `T` is `QueryResultRow`
+ * (`Record<string, unknown>`). Supply your row shape as the type argument to
+ * receive typed rows, e.g.
+ * `connection.query<{ id: number }>('SELECT id FROM t')`. Works the same on
+ * `pool.query<T>()`.
+ */
+export interface QueryResult<T = QueryResultRow> {
+    rows: T[];
     rowCount: number;
     fields: { name: string; dataTypeID: number; dataTypeSize: number; dataTypeModifier: number }[];
     notices: string[];
@@ -129,10 +141,8 @@ class NzConnection extends EventEmitter {
     private _textColumnParsers: TextValueParser[] | null = null;
     private _textBufferParsers: (TextBufferParser | null)[] | null = null;
     private _binaryFieldParsers: BinaryFieldParser[] | null = null;
-    private _rows: unknown[] = [];
     private _tupdesc: DbosTupleDesc = new DbosTupleDesc();
     private _batchRowCache: unknown[][] | null = null;
-    private _tmpBuffer: Buffer = Buffer.alloc(65536);
     private _varOffsetsScratch: number[] = [];
 
     // Diagnostics counters
@@ -233,11 +243,11 @@ class NzConnection extends EventEmitter {
     private static _streamRegistry: Map<string, Readable> = new Map();
 
     static registerImportStream(id: string, stream: Readable) {
-        this._streamRegistry.set(id, stream);
+        NzConnection._streamRegistry.set(id, stream);
     }
 
     static unregisterImportStream(id: string) {
-        this._streamRegistry.delete(id);
+        NzConnection._streamRegistry.delete(id);
     }
 
     constructor(config: NzConnectionConfig | string) {
@@ -292,7 +302,7 @@ class NzConnection extends EventEmitter {
                 this._exportStream = s;
             },
             hasImportStream: (id) => NzConnection._streamRegistry.has(id),
-            getImportStream: (id) => NzConnection._streamRegistry.get(id)!,
+            getImportStream: (id) => NzConnection._streamRegistry.get(id) as Readable,
         };
     }
 
@@ -322,14 +332,15 @@ class NzConnection extends EventEmitter {
                 }
             };
 
-            this._socket = new net.Socket();
-            this._socket.connect(this.config.port || 5480, this.config.host, async () => {
+            const socket = new net.Socket();
+            this._socket = socket;
+            socket.connect(this.config.port || 5480, this.config.host, async () => {
                 if (connectionTimedOut) return; // Already timed out
                 debug('Socket connected');
-                this._socket!.setNoDelay(true);
-                this._stream = this._socket!;
+                socket.setNoDelay(true);
+                this._stream = socket;
                 const handshake = new Handshake(
-                    this._socket!,
+                    socket,
                     this._stream,
                     this.config.host,
                     this.config as NzConnectionConfig & {
@@ -354,11 +365,11 @@ class NzConnection extends EventEmitter {
                     resolve();
                 } catch (err) {
                     clearConnectionTimeout();
-                    this._socket!.destroy();
+                    socket.destroy();
                     reject(err);
                 }
             });
-            this._socket.on('error', (err) => {
+            socket.on('error', (err) => {
                 debug('Socket error', err);
                 clearConnectionTimeout();
                 if (!this._connected) reject(err);
@@ -569,13 +580,27 @@ class NzConnection extends EventEmitter {
     /**
      * Execute SQL and buffer all rows. Parameters use client-side escaped interpolation ($1, $2, ...).
      */
-    async query(sql: string, params?: unknown[]): Promise<QueryResult> {
+    /**
+     * Execute a query and buffer all returned rows.
+     *
+     * `T` is the type of each element of `result.rows` and defaults to
+     * `QueryResultRow` (`Record<string, unknown>`). Pass an interface or type
+     * literal to receive typed rows:
+     *
+     * ```typescript
+     * const { rows } = await connection.query<{ id: number; name: string }>(
+     *     'SELECT id, name FROM t WHERE id = $1',
+     *     [42]
+     * );
+     * ```
+     */
+    async query<T = QueryResultRow>(sql: string, params?: unknown[]): Promise<QueryResult<T>> {
         const cmd = this.createCommand(sql, params);
         const reader = await this.executeReader(cmd);
         try {
-            const rows: Record<string, unknown>[] = [];
+            const rows: T[] = [];
             while (await reader.read()) {
-                rows.push(reader.getRowObject()!);
+                rows.push(reader.getRowObject() as unknown as T);
             }
             const fields = (reader.columnDescriptions || []).map((c) => ({
                 name: c.name,
@@ -588,7 +613,7 @@ class NzConnection extends EventEmitter {
                 rowCount: cmd._recordsAffected >= 0 ? cmd._recordsAffected : rows.length,
                 fields,
                 notices: [...cmd.notices],
-            };
+            } satisfies QueryResult<T>;
         } finally {
             await reader.close();
         }
@@ -960,13 +985,6 @@ class NzConnection extends EventEmitter {
         return val;
     }
 
-    private async _readInt16(): Promise<number> {
-        await this._ensureBufferData(2);
-        const val = this._intBuf.readInt16BE(this._intBufStart);
-        this._intBufStart += 2;
-        return val;
-    }
-
     private async _readByte(): Promise<number> {
         await this._ensureBufferData(1);
         const val = this._intBuf[this._intBufStart];
@@ -1025,7 +1043,7 @@ class NzConnection extends EventEmitter {
         let timer: NodeJS.Timeout | undefined;
         const execPromise = this._trackExecution(this._doExecute(commandOrSql));
 
-        const timeoutPromise = new Promise<boolean>((resolve, reject) => {
+        const timeoutPromise = new Promise<boolean>((_resolve, reject) => {
             timer = setTimeout(() => {
                 debug('Command timeout triggered');
                 // Reject immediately so the caller always sees the timeout,
@@ -1040,7 +1058,8 @@ class NzConnection extends EventEmitter {
         try {
             return await Promise.race([execPromise, timeoutPromise]);
         } catch (err: unknown) {
-            if ((err as Error).message && (err as Error).message.includes('Command execution timeout')) {
+            const errorMessage = (err as Error).message;
+            if (errorMessage.includes('Command execution timeout')) {
                 execPromise.catch(() => {});
             }
             throw err;
@@ -1093,17 +1112,32 @@ class NzConnection extends EventEmitter {
         }
     }
 
-    async executeReader(command: NzCommand): Promise<NzDataReader> {
+    /**
+     * Execute a command and return a streaming reader.
+     *
+     * `T` is the row shape returned by `reader.getRowObject()` and by async
+     * iteration. It defaults to `QueryResultRow`
+     * (`Record<string, unknown>`); pass an interface or type literal for typed
+     * rows:
+     *
+     * ```typescript
+     * const reader = await connection.executeReader<{ TABLENAME: string }>(
+     *     connection.createCommand('SELECT TABLENAME FROM _V_TABLE')
+     * );
+     * for await (const row of reader) console.log(row.TABLENAME);
+     * ```
+     */
+    async executeReader<T = QueryResultRow>(command: NzCommand): Promise<NzDataReader<T>> {
         const timeoutSeconds = command.commandTimeout || this.commandTimeout;
         if (!timeoutSeconds || timeoutSeconds <= 0) {
-            return this._doExecuteReader(command);
+            return this._doExecuteReader<T>(command);
         }
 
         const execGen = this._commandGeneration + 1;
         let timer: NodeJS.Timeout | undefined;
-        const execPromise = this._trackExecution(this._doExecuteReader(command));
+        const execPromise = this._trackExecution(this._doExecuteReader<T>(command));
 
-        const timeoutPromise = new Promise<NzDataReader>((resolve, reject) => {
+        const timeoutPromise = new Promise<NzDataReader<T>>((_resolve, reject) => {
             timer = setTimeout(() => {
                 debug('Command timeout triggered');
                 // Reject immediately so the caller always sees the timeout,
@@ -1118,7 +1152,8 @@ class NzConnection extends EventEmitter {
         try {
             return await Promise.race([execPromise, timeoutPromise]);
         } catch (err: unknown) {
-            if ((err as Error).message && (err as Error).message.includes('Command execution timeout')) {
+            const errorMessage = (err as Error).message;
+            if (errorMessage.includes('Command execution timeout')) {
                 // If the execution actually completed before the cancel landed,
                 // it resolved with a reader that nobody received. Close it so
                 // releaseCallback fires and _executing is not stuck as true,
@@ -1137,7 +1172,7 @@ class NzConnection extends EventEmitter {
         }
     }
 
-    private async _doExecuteReader(command: NzCommand): Promise<NzDataReader> {
+    private async _doExecuteReader<T = QueryResultRow>(command: NzCommand): Promise<NzDataReader<T>> {
         this._assertCanExecute();
         if (this._executing) {
             throw new Error('Connection is already executing a command');
@@ -1164,7 +1199,7 @@ class NzConnection extends EventEmitter {
             while (!item.done) {
                 const val = item.value;
                 if (val.type === 'RowDescription') {
-                    columns = val.columns!;
+                    columns = val.columns as ColumnInfo[];
                     columnNullability = null;
                 } else if (val.type === 'RowDescriptionStandard') {
                     const desc = val.desc;
@@ -1172,7 +1207,7 @@ class NzConnection extends EventEmitter {
                         columnNullability = [...desc.fieldNullAllowed];
                         if (columns.length === 0) {
                             const ps = command._cachedRowDescription;
-                            if (ps && ps.description) {
+                            if (ps?.description) {
                                 columns = ps.description;
                             }
                         }
@@ -1207,7 +1242,7 @@ class NzConnection extends EventEmitter {
                     this._executing = false;
                 },
                 initialNextItem as GeneratorItem | null
-            );
+            ) as unknown as NzDataReader<T>;
         } catch (e) {
             if (e instanceof NzProtocolError) this._markProtocolFault();
             this._executing = false;
@@ -1235,7 +1270,6 @@ class NzConnection extends EventEmitter {
     }
 
     private async *_responseGeneratorCore(command: NzCommand): AsyncGenerator<ResponseMessage> {
-        this._rows = [];
         this._rowDescription = null;
         this._textColumnParsers = null;
         this._textBufferParsers = null;
@@ -1248,7 +1282,7 @@ class NzConnection extends EventEmitter {
         while (!completed) {
             // Drain batch cache first
             if (this._batchRowCache && this._batchRowCache.length > 0) {
-                const cached = this._batchRowCache.shift()!;
+                const cached = this._batchRowCache.shift() as unknown[];
                 this._diag.batchCacheHits = (this._diag.batchCacheHits || 0) + 1;
                 this._diag.generatorYields = (this._diag.generatorYields || 0) + 1;
                 this._diag.generatorYieldsDataRow = (this._diag.generatorYieldsDataRow || 0) + 1;
@@ -1376,7 +1410,7 @@ class NzConnection extends EventEmitter {
                 this._parseRowDescription(data, command);
                 this._diag.generatorYields = (this._diag.generatorYields || 0) + 1;
                 this._diag.generatorYieldsRowDesc = (this._diag.generatorYieldsRowDesc || 0) + 1;
-                yield { type: 'RowDescription', columns: this._rowDescription! };
+                yield { type: 'RowDescription', columns: this._rowDescription as unknown as ColumnInfo[] };
                 continue;
             }
 
@@ -1410,7 +1444,7 @@ class NzConnection extends EventEmitter {
                 continue;
             }
 
-            debug('Unknown message:', '0x' + type.toString(16));
+            debug('Unknown message:', `0x${type.toString(16)}`);
             const len = validateProtocolLength(await this._readInt32(), 'unknownMessagePayload');
             if (len > 0) await this._readBytes(len);
         }
@@ -1519,7 +1553,7 @@ class NzConnection extends EventEmitter {
                 row[columnNumber] = bufParser(data, dataIdx, actualLen);
             } else {
                 this._diag.textParseSlowPath = (this._diag.textParseSlowPath || 0) + 1;
-                const colDesc = this._rowDescription![columnNumber];
+                const colDesc = (this._rowDescription as ColumnInfo[])[columnNumber];
                 const value = data.toString('utf8', dataIdx, dataIdx + actualLen);
                 const parser = this._textColumnParsers?.[columnNumber];
                 row[columnNumber] = parser
@@ -1542,10 +1576,6 @@ class NzConnection extends EventEmitter {
         const row = this._parseDbosRowInPlace(this._intBuf, this._intBufStart + 8, this._intBufStart + totalMsg);
         this._intBufStart += totalMsg;
         return row;
-    }
-
-    private _parseDbosRow(data: Buffer): unknown[] {
-        return this._parseDbosRowInPlace(data, 0, data.length);
     }
 
     private _parseDbosRowInPlace(buffer: Buffer, baseOffset: number, endOffset: number = buffer.length): unknown[] {
@@ -1813,10 +1843,6 @@ class NzConnection extends EventEmitter {
         return parsers;
     }
 
-    private _parseFieldByType(fieldData: Buffer, fldType: number, fldLen: number, fieldIdx: number): unknown {
-        return this._parseFieldByTypeInPlace(fieldData, 0, fldType, fldLen, fieldIdx);
-    }
-
     private _parseFieldByTypeInPlace(
         buffer: Buffer,
         offset: number,
@@ -1870,10 +1896,6 @@ class NzConnection extends EventEmitter {
             default:
                 return buffer.toString('utf8', offset, offset + fldLen);
         }
-    }
-
-    private _columnIsNull(data: Buffer, fieldLf: number): boolean {
-        return this._columnIsNullInPlace(data, 0, fieldLf);
     }
 }
 

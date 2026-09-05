@@ -1,6 +1,6 @@
 {
   "name": "@justybase/netezza-driver",
-  "version": "3.0.0",
+  "version": "3.1.0",
   "description": "Native TypeScript driver for IBM Netezza / PureData System for Analytics",
   "main": "./dist/cjs/index.js",
   "module": "./dist/esm/index.js",
@@ -24,8 +24,15 @@
     "build:watch": "node ./node_modules/typescript/lib/tsc.js -p tsconfig.cjs.json --watch",
     "clean": "rimraf dist",
     "docs": "typedoc --entryPoints src/index.ts --out docs-api",
-    "format": "prettier --write src/",
-    "format:check": "prettier --check src/",
+    "format": "prettier --write src/ tests/types/ tools/examples/typed_query.ts",
+    "format:check": "prettier --check src/ tests/types/ tools/examples/typed_query.ts",
+    "lint": "biome lint",
+    "lint:fix": "biome lint --write",
+    "typecheck": "npm run typecheck:cjs && npm run typecheck:esm",
+    "typecheck:cjs": "node ./node_modules/typescript/lib/tsc.js -p tsconfig.cjs.json --noEmit",
+    "typecheck:esm": "node ./node_modules/typescript/lib/tsc.js -p tsconfig.esm.json --noEmit",
+    "typecheck:types": "node ./node_modules/typescript/lib/tsc.js -p tsconfig.types-test.json",
+    "check": "npm run format:check && npm run lint && npm run typecheck && npm run typecheck:types",
     "test": "npm run build && npm run test:smoke:run",
     "test:run": "jest --runInBand --config jest.config.js --testPathPatterns=\\.smoke\\.",
     "test:unit": "npm run build && npm run test:unit:run",
@@ -68,6 +75,7 @@
     "debug": "^4.4.3"
   },
   "devDependencies": {
+    "@biomejs/biome": "^2.5.12",
     "@types/debug": "^4.1.13",
     "@types/node": "^26.2.0",
     "cross-env": "^10.1.0",

@@ -1,9 +1,9 @@
-import * as crypto from 'crypto';
-import * as os from 'os';
-import * as net from 'net';
-import * as tls from 'tls';
-import * as fs from 'fs';
-import * as path from 'path';
+import * as crypto from 'node:crypto';
+import * as os from 'node:os';
+import type * as net from 'node:net';
+import * as tls from 'node:tls';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import { PGUtil } from './utils/PGUtil';
 import { BackendMessageCode, HandshakeCode, ProtocolVersion } from './protocol/constants';
 import { createNzDatabaseError, NzDatabaseError } from './errors/NzDatabaseError';
@@ -37,7 +37,6 @@ type Stream = net.Socket | tls.TLSSocket;
 class Handshake {
     private _socket: net.Socket;
     private _stream: Stream;
-    private _host: string;
     private _options: HandshakeOptions;
     private _transport: SocketTransport = new SocketTransport();
 
@@ -54,10 +53,9 @@ class Handshake {
     public backendProcessId: number = 0;
     public backendSecretKey: number = 0;
 
-    constructor(socket: net.Socket, stream: Stream, host: string, options: HandshakeOptions = {}) {
+    constructor(socket: net.Socket, stream: Stream, _host: string, options: HandshakeOptions = {}) {
         this._socket = socket;
         this._stream = stream;
-        this._host = host;
         this._options = options;
         this._transport.attach(stream);
         this._clientType = normalizeClientType(options.clientType);
@@ -544,7 +542,6 @@ class Handshake {
                 );
                 const body = await this.readBytes(len);
                 debug(`Notice: ${body.toString()}`);
-                continue;
             }
         }
     }

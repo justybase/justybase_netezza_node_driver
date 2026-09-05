@@ -62,6 +62,57 @@ async function example() {
 }
 ```
 
+### Typed rows
+
+`query()` is generic: pass your row shape as the type argument and `result.rows`
+becomes `T[]` instead of `Record<string, unknown>[]`. This works on both
+`connection.query<T>()` and `pool.query<T>()`.
+
+```typescript
+interface TableRow {
+    TABLENAME: string;
+    ROWS: number;
+}
+
+const result = await connection.query<TableRow>(
+    'SELECT TABLENAME, ROWS FROM _V_TABLE WHERE TABLENAME = $1 LIMIT 5',
+    ['DIMDATE']
+);
+
+// result.rows is TableRow[] — fully typed, no casts needed
+for (const row of result.rows) {
+    console.log(row.TABLENAME, row.ROWS);
+}
+```
+
+Without a type argument the rows stay `QueryResultRow`
+(`Record<string, unknown>`), preserving the default strict-but-unknown contract.
+
+The streaming API is typed the same way: `executeReader<T>()` on a connection or
+`NzCommand` returns an `NzDataReader<T>` whose `getRowObject()` and async
+iteration are typed.
+
+```typescript
+const reader = await connection
+    .createCommand('SELECT TABLENAME FROM _V_TABLE LIMIT 5')
+    .executeReader<{ TABLENAME: string }>();
+
+try {
+    for await (const row of reader) {
+        console.log(row.TABLENAME); // string
+    }
+} finally {
+    await reader.close();
+}
+```
+
+`getRowObject()` also accepts a per-call type argument, so you can type an
+individual row even on a reader created without a type parameter:
+
+```typescript
+const row = reader.getRowObject<{ TABLENAME: string }>();
+```
+
 ### Parameters (honest note)
 
 Netezza’s simple-query path used by this driver does **not** expose server-side bind/prepared parameters. `$1`, `$2`, … placeholders are **escaped client-side** and interpolated into the SQL text before send (`escapeLiteral` / `substituteParameters`). Prefer primitives (`null`, boolean, number, bigint, string, `Date`, `Buffer`); unsupported object shapes are rejected.
@@ -198,7 +249,10 @@ Important: this project is an independent TypeScript implementation and does not
 
 ## Testing
 
-Repository CI runs offline unit tests (`npm run test:unit`) on Node 22.x and 24.x. Live Netezza smoke/full suites stay local. The published package `engines` field requires `>=22.0.0`.
+Repository CI runs formatting checks, Biome lint, TypeScript typechecks and
+compile-time type tests, and offline unit tests on Node 22.x and 24.x. Live
+Netezza smoke/full suites stay local. The published package `engines` field
+requires `>=22.0.0`.
 
 ### Environment variables
 
@@ -233,6 +287,13 @@ npm run test:unit
 
 Covers SQL parameter escaping, `NzDatabaseError` parsing, and connection-string parsing. No database required.
 
+Compile-time type tests in [`tests/types/`](tests/types) guard the generic
+`query<T>()` / `executeReader<T>()` typings (and the typed rows they return):
+
+```bash
+npm run typecheck:types
+```
+
 ### Smoke Tests (Fast)
 
 Requires a live Netezza server and `NZ_DEV_HOST` + `NZ_DEV_PASSWORD` (or `NZ_USE_LAB_DEFAULTS=1`).
@@ -249,6 +310,15 @@ See [LINUX_ODBC_FIX.md](LINUX_ODBC_FIX.md) if ODBC comparison tests fail on Linu
 
 ```bash
 npm run test:full
+```
+
+### Quality gate (offline, run in CI)
+
+```bash
+npm run check             # format + lint (Biome) + typecheck + type tests
+npm run lint              # Biome lint (errors fail the build)
+npm run typecheck         # tsc --noEmit on the CJS and ESM configs
+npm run typecheck:types   # compile-time type tests (tests/types)
 ```
 
 ### Other Test Commands

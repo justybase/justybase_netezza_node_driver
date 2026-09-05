@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.1.0] - 2026-09-05
+
+### Added
+- Generic buffered queries: `query<T>()` on `NzConnection` and `NzPool` returns
+  `QueryResult<T>` with `rows: T[]` (default `QueryResultRow` =
+  `Record<string, unknown>`); existing untyped calls keep the strict-`unknown`
+  contract unchanged.
+- Generic streaming readers: `executeReader<T>()` on connections and
+  `NzCommand`, `NzDataReader<T>`, typed `getRowObject<Row>()`, and typed async
+  iteration over rows.
+- Typed `NzDataReader.currentRow` / `getValues()` derived from the shared row
+  type `TRow`, with a per-call `getValues<V>()` override.
+- Developer tooling: Biome lint (`npm run lint`), `npm run typecheck` scripts,
+  and compile-time type tests under `tests/types/`
+  (`npm run typecheck:types`), all wired into CI. `npm run check` runs the
+  complete offline quality gate (format, lint, typecheck, type tests).
+
 ## [3.0.0] - 2026-08-26
 
 ### Breaking

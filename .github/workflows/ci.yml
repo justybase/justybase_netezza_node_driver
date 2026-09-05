@@ -30,6 +30,15 @@ jobs:
       - name: Check formatting
         run: npm run format:check
 
+      - name: Lint (Biome)
+        run: npm run lint
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Compile-time type tests
+        run: npm run typecheck:types
+
       - name: Build
         run: npm run build
 

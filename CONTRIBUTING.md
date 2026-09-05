@@ -52,7 +52,7 @@ Enhancement suggestions are tracked as GitHub issues. When creating an enhanceme
 
 ### Prerequisites
 
-- Node.js 22.0.0 or higher (CI uses 22; published package supports >=18.18.0)
+- Node.js 22.0.0 or higher (CI runs 22 and 24; published package requires >=22.0.0)
 - npm 9.0.0 or higher
 - TypeScript 7.x
 
@@ -116,30 +116,36 @@ tools/examples/         # Example scripts
 
 2. **Make your changes** following the coding standards
 
-3. **Add or update tests** for your changes
+3. **Add or update tests** for your changes (runtime tests and, when the public
+   API types change, the compile-time tests under `tests/types/`)
 
-4. **Run the test suite**:
+4. **Run the quality gate** (no database required):
    ```bash
-   npm run test:smoke  # Quick validation (requires live Netezza)
-   npm run test:full   # Comprehensive tests (requires Netezza server)
+   npm run check   # format + lint (Biome) + typecheck + compile-time type tests
    ```
 
-5. **Build the project**:
+5. **Run the test suite** (requires a live Netezza server):
+   ```bash
+   npm run test:smoke  # Quick validation
+   npm run test:full   # Comprehensive tests
+   ```
+
+6. **Build the project**:
    ```bash
    npm run build
    ```
 
-6. **Commit your changes** with a clear commit message:
+7. **Commit your changes** with a clear commit message:
    ```bash
    git commit -m "feat: add support for new data type"
    ```
 
-7. **Push to your fork**:
+8. **Push to your fork**:
    ```bash
    git push origin feature/your-feature-name
    ```
 
-8. **Create a Pull Request** on GitHub
+9. **Create a Pull Request** on GitHub
 
 ### Commit Message Guidelines
 
@@ -170,6 +176,9 @@ test: add tests for NULL value handling
 - Use meaningful variable and function names
 - Avoid `any` type when possible
 - Use interfaces for configuration objects
+- Run `npm run lint` (Biome) and `npm run typecheck` before submitting
+- Extend the compile-time type tests under `tests/types/` (run via
+  `npm run typecheck:types`) whenever the public API types change
 
 ### Code Style
 
@@ -221,6 +230,7 @@ npm run test:full
 - Place test files in the `tests/` directory
 - Use `.test.js` extension for regular tests
 - Use `.smoke.test.js` extension for smoke tests
+- Use `.test-d.ts` files under `tests/types/` for compile-time type tests
 - Follow the existing test patterns
 
 ## Questions?

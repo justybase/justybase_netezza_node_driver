@@ -1,4 +1,4 @@
-import { NzConnectionConfig } from './NzConnection';
+import type { NzConnectionConfig } from './NzConnection';
 
 /**
  * Parse a Netezza connection URI into NzConnectionConfig.

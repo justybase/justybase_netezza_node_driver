@@ -1,9 +1,10 @@
 // NzConnection type reference for circular dependency
-import { NzDataReader } from './NzDataReader';
+import type { NzDataReader } from './NzDataReader';
+import type { QueryResultRow } from './NzConnection';
 
 interface NzConnection {
     execute(command: NzCommand, bufferOnly?: boolean): Promise<boolean>;
-    executeReader(command: NzCommand): Promise<NzDataReader>;
+    executeReader<T = QueryResultRow>(command: NzCommand): Promise<NzDataReader<T>>;
     cancel(): Promise<void>;
     commandTimeout?: number;
 }
@@ -59,9 +60,22 @@ class NzCommand {
         return this._recordsAffected;
     }
 
-    async executeReader(): Promise<NzDataReader> {
+    /**
+     * Execute the command and return a streaming reader.
+     *
+     * `T` is the row shape returned by `reader.getRowObject()` and by async
+     * iteration. It defaults to `QueryResultRow`
+     * (`Record<string, unknown>`); pass an interface or type literal for typed
+     * rows:
+     *
+     * ```typescript
+     * const reader = await cmd.executeReader<{ TABLENAME: string }>();
+     * for await (const row of reader) console.log(row.TABLENAME);
+     * ```
+     */
+    async executeReader<T = QueryResultRow>(): Promise<NzDataReader<T>> {
         this._notices = [];
-        return this.connection.executeReader(this);
+        return this.connection.executeReader<T>(this);
     }
 
     async cancel(): Promise<void> {

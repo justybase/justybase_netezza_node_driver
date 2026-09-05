@@ -1,5 +1,11 @@
-import { EventEmitter } from 'events';
-import { NzConnection, NzConnectionConfig, QueryResult, ExecuteResult } from './NzConnection';
+import { EventEmitter } from 'node:events';
+import {
+    NzConnection,
+    type NzConnectionConfig,
+    type ExecuteResult,
+    type QueryResult,
+    type QueryResultRow,
+} from './NzConnection';
 
 const debug = require('debug')('nz:pool');
 
@@ -168,7 +174,11 @@ class NzPool extends EventEmitter {
         return new Promise<{ client: NzConnection; release: (err?: Error) => void }>((resolve, reject) => {
             const callback = (err: Error | undefined, client?: NzConnection, release?: (err?: Error) => void) => {
                 if (err) return reject(err);
-                resolve({ client: client!, release: release! });
+                if (!client || !release) {
+                    reject(new Error('Pool checkout completed without a client or release function'));
+                    return;
+                }
+                resolve({ client, release });
             };
 
             // If we have idle clients, use one immediately
@@ -213,14 +223,22 @@ class NzPool extends EventEmitter {
     }
 
     /**
-     * Execute a query using a connection from the pool.
-     * Returns buffered rows and automatically releases the connection.
+     * Execute a query using a connection from the pool and buffer all rows.
+     * The connection is automatically released after execution.
+     *
+     * `T` is the type of each element of `result.rows` and defaults to
+     * `QueryResultRow` (`Record<string, unknown>`). Pass an interface or type
+     * literal to receive typed rows:
+     *
+     * ```typescript
+     * const { rows } = await pool.query<{ id: number }>('SELECT id FROM t');
+     * ```
      */
-    async query(sql: string, params?: unknown[]): Promise<QueryResult> {
+    async query<T = QueryResultRow>(sql: string, params?: unknown[]): Promise<QueryResult<T>> {
         const { client, release } = await this.connect();
 
         try {
-            const result = await client.query(sql, params);
+            const result = await client.query<T>(sql, params);
             release();
             return result;
         } catch (err) {
@@ -375,16 +393,18 @@ class NzPool extends EventEmitter {
             return;
         }
 
-        const pendingItem = this._pendingQueue.shift()!;
+        const pendingItem = this._pendingQueue.shift() as PendingItem;
 
         if (this._idle.length) {
-            const idleItem = this._idle.pop()!;
+            const idleItem = this._idle.pop() as IdleItem;
             if (idleItem.timeoutId) clearTimeout(idleItem.timeoutId);
-            return this._acquireClient(idleItem.client, pendingItem, false);
+            this._acquireClient(idleItem.client, pendingItem, false);
+            return;
         }
 
         if (!this._isFull()) {
-            return this._newClient(pendingItem);
+            this._newClient(pendingItem);
+            return;
         }
     }
 
@@ -523,20 +543,22 @@ class NzPool extends EventEmitter {
             if (useCount >= this._maxUses) {
                 debug('remove expended client');
             }
-            return this._remove(client, () => {
+            this._remove(client, () => {
                 this._ensureMinIdle();
                 this._pulseQueue();
             });
+            return;
         }
 
         // Remove expired clients
         if (this._expired.has(client)) {
             debug('remove expired client');
             this._expired.delete(client);
-            return this._remove(client, () => {
+            this._remove(client, () => {
                 this._ensureMinIdle();
                 this._pulseQueue();
             });
+            return;
         }
 
         // Set up idle timeout

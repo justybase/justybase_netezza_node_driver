@@ -131,8 +131,9 @@ async function verifySpecificQuery(conn, odbcConn, sql) {
             if (typeof valJs === 'string') valJs = valJs.trim();
             if (typeof valOdbc === 'string') valOdbc = valOdbc.trim();
 
-            // Handle Dates/Nulls if necessary (simple equality check first)
-            if (valJs != valOdbc) {
+            // Handle Dates/Nulls if necessary (simple equality check first).
+            // Loose coercion is avoided; coerced-equal values are caught below by the String() comparison.
+            if (valJs !== valOdbc) {
                 // Check if it's a date mismatch due to TZ/format
                 // JS: 'Sat Jan 01 2005 01:00:00 GMT+0100' (Date object toString)
                 // ODBC: '2005-01-01 00:00:00'

@@ -38,7 +38,9 @@ describeNz('GetSchemaTableTests', () => {
 
         // Verify column types
         const columns = {};
-        schemaTable.Rows.forEach(r => columns[r.ColumnName.toUpperCase()] = r);
+        schemaTable.Rows.forEach((r) => {
+            columns[r.ColumnName.toUpperCase()] = r;
+        });
 
         expect(columns['ENGLISHDAYNAMEOFWEEK'].DataType).toBe(String);
         expect(columns['INT_COL'].DataType).toBe(Number);
@@ -114,7 +116,9 @@ describeNz('GetSchemaTableTests', () => {
         await reader.close();
 
         const rows = {};
-        schemaTable.Rows.forEach(r => rows[r.ColumnName.toUpperCase()] = r);
+        schemaTable.Rows.forEach((r) => {
+            rows[r.ColumnName.toUpperCase()] = r;
+        });
 
         expect(rows['FIXED_CHAR'].ColumnSize).toBe(10);
         expect(rows['VAR_CHAR'].ColumnSize).toBe(100);
@@ -236,7 +240,9 @@ describeNz('GetSchemaTableTests', () => {
 
         // Check types mainly
         const rows = {};
-        schemaTable.Rows.forEach(r => rows[r.ColumnName.toUpperCase()] = r);
+        schemaTable.Rows.forEach((r) => {
+            rows[r.ColumnName.toUpperCase()] = r;
+        });
 
         expect(rows['COMPUTED_INT'].DataType).toBe(Number);
         expect(rows['COMPUTED_STRING'].DataType).toBe(String);

@@ -222,7 +222,8 @@ describeNz('Additional Full Tests - Data Types Deep Dive', () => {
         const reader = await cmd.executeReader();
         expect(await reader.read()).toBe(true);
         const val = reader.getValue(0);
-        expect(parseFloat(val)).toBeCloseTo(1234567890.123456789, 6);
+        // The literal is written as its float64 representation; the driver returns the exact NUMERIC as a string.
+        expect(parseFloat(val)).toBeCloseTo(1234567890.1234567, 6);
         await reader.close();
     });
 

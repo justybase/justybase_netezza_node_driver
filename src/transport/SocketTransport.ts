@@ -1,6 +1,6 @@
-import { EventEmitter } from 'events';
-import * as net from 'net';
-import * as tls from 'tls';
+import { EventEmitter } from 'node:events';
+import type * as net from 'node:net';
+import type * as tls from 'node:tls';
 import { validateProtocolLength } from '../protocol/ProtocolLength';
 
 export type Stream = net.Socket | tls.TLSSocket;

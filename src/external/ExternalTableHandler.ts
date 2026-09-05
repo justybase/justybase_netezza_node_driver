@@ -1,6 +1,6 @@
-import * as fs from 'fs';
-import * as path from 'path';
-import { Readable } from 'stream';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import type { Readable } from 'node:stream';
 import { ExtabSock } from '../protocol/constants';
 import { PGUtil } from '../utils/PGUtil';
 import { validateProtocolLength } from '../protocol/ProtocolLength';
