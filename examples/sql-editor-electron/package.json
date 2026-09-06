@@ -11,6 +11,7 @@
     "build": "electron-vite build",
     "preview": "electron-vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
+    "test:editor": "node --experimental-strip-types --test tests/sqlShortcuts.test.ts",
     "test:import": "node --experimental-strip-types --test tests/import.e2e.test.ts",
     "dist": "npm run build && electron-builder --dir --publish never",
     "dist:win": "npm run build && electron-builder --win --publish never",

@@ -1,4 +1,4 @@
-import { app, shell, BrowserWindow } from 'electron';
+import { app, dialog, shell, BrowserWindow } from 'electron';
 import { join } from 'node:path';
 import { registerIpc } from './ipc';
 import { disconnect } from './db';
@@ -25,6 +25,27 @@ function createWindow(): BrowserWindow {
   win.webContents.setWindowOpenHandler((details) => {
     shell.openExternal(details.url);
     return { action: 'deny' };
+  });
+
+  // The renderer uses beforeunload to protect unsaved SQL. Electron silently
+  // cancels the close when that handler prevents unload, so give the user an
+  // explicit choice and allow the unload only after they choose to discard.
+  win.webContents.on('will-prevent-unload', (event) => {
+    const choice = dialog.showMessageBoxSync(win, {
+      type: 'warning',
+      title: 'Unsaved SQL changes',
+      message: 'There are unsaved SQL changes.',
+      detail: 'Do you want to discard them and close the editor?',
+      buttons: ['Discard changes', 'Keep editing'],
+      defaultId: 1,
+      cancelId: 1
+    });
+
+    if (choice === 0) {
+      // Electron's will-prevent-unload event is inverted: preventing this
+      // event ignores the renderer's beforeunload veto and permits closing.
+      event.preventDefault();
+    }
   });
 
   if (isDev && process.env['ELECTRON_RENDERER_URL']) {

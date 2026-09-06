@@ -3,6 +3,7 @@ name: Build SQL Editor Electron
 on:
   push:
     branches: [main]
+    tags: ['sql-editor-v*']
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -26,18 +27,26 @@ jobs:
             arch: x64
             runner: ubuntu-latest
             script: dist:linux
+            installer_pattern: '*.AppImage'
+            portable_pattern: '*.tar.gz'
           - platform: windows
             arch: x64
             runner: windows-latest
             script: dist:win
+            installer_pattern: '*.exe'
+            portable_pattern: '*-win.zip'
           - platform: macos
             arch: x64
             runner: macos-latest
             script: dist:mac
+            installer_pattern: '*.dmg'
+            portable_pattern: '*.zip'
           - platform: macos
             arch: arm64
             runner: macos-latest
             script: dist:mac
+            installer_pattern: '*.dmg'
+            portable_pattern: '*.zip'
 
     defaults:
       run:
@@ -63,16 +72,84 @@ jobs:
       - name: Typecheck example
         run: npm run typecheck
 
+      - name: Run editor regression tests
+        run: npm run test:editor
+
       - name: Run generated import tests
         run: npm run test:import
 
       - name: Build installer and archive
         run: npm run ${{ matrix.script }} -- --${{ matrix.arch }}
 
-      - name: Upload Electron artifacts
+      - name: Verify package outputs
+        shell: bash
+        run: |
+          installer_file=
+          for file in release/${{ matrix.installer_pattern }}; do
+            if [ -f "$file" ]; then
+              installer_file=$file
+              break
+            fi
+          done
+          portable_file=
+          for file in release/${{ matrix.portable_pattern }}; do
+            if [ -f "$file" ]; then
+              portable_file=$file
+              break
+            fi
+          done
+          test -n "$installer_file"
+          test -n "$portable_file"
+          echo "Installer: $installer_file"
+          echo "Portable: $portable_file"
+
+      - name: Upload installer artifact
         uses: actions/upload-artifact@v4
         with:
-          name: sql-editor-electron-${{ matrix.platform }}-${{ matrix.arch }}
-          path: examples/sql-editor-electron/release/*
+          name: sql-editor-electron-${{ matrix.platform }}-${{ matrix.arch }}-installer
+          path: examples/sql-editor-electron/release/${{ matrix.installer_pattern }}
           if-no-files-found: error
           retention-days: 14
+
+      - name: Upload portable artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sql-editor-electron-${{ matrix.platform }}-${{ matrix.arch }}-portable
+          path: examples/sql-editor-electron/release/${{ matrix.portable_pattern }}
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Publish GitHub Release
+    if: startsWith(github.ref, 'refs/tags/sql-editor-v')
+    needs: package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download packaged artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: sql-editor-electron-*
+          path: release-assets
+
+      - name: Prepare uniquely named release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release-upload
+          while IFS= read -r -d '' file; do
+            artifact_name=$(basename "$(dirname "$file")")
+            file_name=$(basename "$file")
+            cp "$file" "release-upload/${artifact_name}-${file_name}"
+          done < <(find release-assets -type f -print0)
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" release-upload/* \
+            --verify-tag \
+            --title "Netezza SQL Editor $GITHUB_REF_NAME" \
+            --generate-notes

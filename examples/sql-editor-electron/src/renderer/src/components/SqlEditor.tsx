@@ -130,7 +130,7 @@ export default function SqlEditor(p: Props) {
         theme: 'vs-dark',
         minimap: { enabled: false },
         fontSize: 13,
-        fontFamily: "'JetBrains Mono', monospace",
+        fontFamily: "'JetBrains Mono', 'Cascadia Mono', Consolas, 'Liberation Mono', monospace",
         padding: { top: 12 },
         scrollBeyondLastLine: false,
         smoothScrolling: true,
@@ -144,6 +144,23 @@ export default function SqlEditor(p: Props) {
         automaticLayout: true
       });
       editorRef.current = editor;
+
+      // Monaco caches character widths. The web font in index.html can finish
+      // loading after the editor is created, which otherwise leaves the text
+      // and caret rendered with different horizontal metrics.
+      const remeasureEditorFonts = () => {
+        if (editorRef.current !== editor) return;
+        monaco.editor.remeasureFonts();
+        editor.layout();
+      };
+      const fontSet = typeof document !== 'undefined' ? document.fonts : undefined;
+      if (fontSet) {
+        fontSet.addEventListener('loadingdone', remeasureEditorFonts);
+        void fontSet.ready
+          .then(() => window.requestAnimationFrame(remeasureEditorFonts))
+          .catch(() => undefined);
+        remeasureEditorFonts();
+      }
 
       editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, () => {
         const model = editor.getModel();
@@ -184,6 +201,7 @@ export default function SqlEditor(p: Props) {
 
       return () => {
         ro.disconnect();
+        fontSet?.removeEventListener('loadingdone', remeasureEditorFonts);
         sub.dispose();
         editor.dispose();
         editorRef.current = null;

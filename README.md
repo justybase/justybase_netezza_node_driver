@@ -39,8 +39,8 @@ CSV/XLSX/XLSB import and export, and query cancellation.
 
 The example has its own dependencies and build workflow; it is not included in
 the published driver package. The Electron workflow builds unsigned macOS
-(x64/arm64), Linux (x64), and Windows (x64) installers and archives as GitHub
-Actions artifacts.
+(x64/arm64), Linux (x64), and Windows (x64) installers and archives as separate
+GitHub Actions artifacts.
 
 ## Quick Start
 

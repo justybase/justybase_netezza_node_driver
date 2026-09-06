@@ -34,8 +34,10 @@ npm run test:import  # generated CSV/XLSX/XLSB import tests
 ```
 
 The repository CI builds unsigned Linux x64, Windows x64, and macOS x64 and
-arm64 packages. The installers and archives are uploaded as GitHub Actions
-artifacts; they are not automatically published as GitHub Releases.
+arm64 packages. For each platform and architecture, the installer and
+portable archive are uploaded as separate GitHub Actions artifacts with
+`-installer` and `-portable` suffixes. Pushing a tag such as
+`sql-editor-v1.0.0` also publishes the packages as a GitHub Release.
 
 Requires Node **>= 22** (like the driver) and a live Netezza/PureData
 server for real queries. Without a server the UI starts in offline mode
