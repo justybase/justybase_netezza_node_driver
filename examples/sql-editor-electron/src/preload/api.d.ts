@@ -162,16 +162,21 @@ export interface NzColumn {
   type: string;
 }
 
-export interface NzTableNode {
+export interface NzSchemaObject {
   name: string;
-  kind: 'TABLE' | 'VIEW';
+  kind: string;
   columns: NzColumn[];
 }
 
 export interface NzSchemaNode {
   name: string;
-  tables: NzTableNode[];
+  objects: NzSchemaObject[];
 }
+
+export type NzObjectDefinitionKind = 'VIEW' | 'PROCEDURE';
+export type NzObjectDefinitionResult =
+  | { ok: true; content: string }
+  | { ok: false; message: string };
 
 export interface NzApi {
   connect: (params: {
@@ -189,6 +194,7 @@ export interface NzApi {
   cancel: (operationId?: string) => Promise<{ ok: boolean; accepted: boolean }>;
   schema: () => Promise<{ schemas: NzSchemaNode[]; warning?: string }>;
   columns: (payload: { database?: string; schema?: string; table: string }) => Promise<NzColumn[]>;
+  objectDefinition: (payload: { database?: string; schema: string; name: string; kind: NzObjectDefinitionKind }) => Promise<NzObjectDefinitionResult>;
   exportCsv: (payload: { operationId: string; rows: Record<string, unknown>[]; fields: NzField[]; defaultName?: string }) => Promise<{ ok: boolean; filePath?: string; canceled?: boolean; message?: string }>;
   exportExcel: (payload: { operationId: string; sql: string; resultSetIndex?: number; format: 'xlsx' | 'xlsb'; timeoutSec?: number; defaultName?: string }) => Promise<
     | { ok: true; filePath: string; rowsExported: number; columns: number }

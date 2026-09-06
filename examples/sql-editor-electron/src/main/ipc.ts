@@ -1,7 +1,7 @@
 import { ipcMain, dialog, BrowserWindow } from 'electron';
 import { readFile, writeFile } from 'node:fs/promises';
 import { basename } from 'node:path';
-import { connect, disconnect, status, runQuery, cancel, getSchemaTree, getColumns, exportRowsToCsv, getCompletionItems, exportQueryToExcel, previewImportFile, importFile } from './db';
+import { connect, disconnect, status, runQuery, cancel, getSchemaTree, getColumns, getObjectDefinition, exportRowsToCsv, getCompletionItems, exportQueryToExcel, previewImportFile, importFile } from './db';
 
 let registered = false;
 
@@ -56,6 +56,13 @@ export function registerIpc(): void {
 
   ipcMain.handle('db:columns', async (_e, payload: { database?: string; schema?: string; table: string }) => {
     return getColumns(payload.schema, payload.table, payload.database);
+  });
+
+  ipcMain.handle('db:object-definition', async (_e, payload: { database?: string; schema: string; name: string; kind: 'VIEW' | 'PROCEDURE' }) => {
+    if (!payload?.schema || !payload?.name || !['VIEW', 'PROCEDURE'].includes(payload.kind)) {
+      return { ok: false, message: 'Schema, object name and a supported object type are required.' };
+    }
+    return getObjectDefinition(payload.schema, payload.name, payload.kind, payload.database);
   });
 
   ipcMain.handle('db:completion', async (_e, payload: { sql: string; offset: number }) => {

@@ -81,7 +81,9 @@ extension for Netezza: system views are qualified per-database as
 `DB.._V_xxx` and filtered with `DBNAME = '<db>'`:
 
 * schemas: `SELECT SCHEMA FROM <DB>.._V_SCHEMA`
-* tables/views: `SELECT OBJNAME, OBJTYPE FROM <DB>.._V_OBJECT_DATA WHERE DBNAME = '<db>' AND SCHEMA = '…'`
+* objects: `SELECT OBJNAME, OBJTYPE FROM <DB>.._V_OBJECT_DATA WHERE DBNAME = '<db>' AND SCHEMA = '…'`; the UI groups tables, views, procedures, functions, sequences and other object types separately
+* procedure signatures: `<DB>.._V_PROCEDURE` (`PROCEDURESIGNATURE`, `RESULT`); the `{}` action opens `PROCEDURESOURCE` in a new SQL tab
+* view source: `<DB>.._V_VIEW.DEFINITION`; the `{}` action opens the definition in a new SQL tab
 * columns: `_V_RELATION_COLUMN JOIN _V_OBJECT_DATA ON OBJID` (`ATTNAME`, `FORMAT_TYPE`)
 
 ## Where is the driver?

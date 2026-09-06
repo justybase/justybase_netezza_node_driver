@@ -8,6 +8,7 @@ const api = {
   cancel: (operationId?: string) => ipcRenderer.invoke('db:cancel', { operationId }),
   schema: () => ipcRenderer.invoke('db:schema'),
   columns: (payload: unknown) => ipcRenderer.invoke('db:columns', payload),
+  objectDefinition: (payload: unknown) => ipcRenderer.invoke('db:object-definition', payload),
   exportCsv: (payload: unknown) => ipcRenderer.invoke('db:export-csv', payload),
   exportExcel: (payload: unknown) => ipcRenderer.invoke('db:export-excel', payload),
   openSqlFile: () => ipcRenderer.invoke('sql:open'),

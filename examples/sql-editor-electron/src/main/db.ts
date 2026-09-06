@@ -396,14 +396,20 @@ export interface ColumnNode {
   name: string;
   type: string;
 }
-export interface TableNode {
+export interface SchemaObjectNode {
   name: string;
-  kind: 'TABLE' | 'VIEW';
+  kind: string;
   columns: ColumnNode[];
 }
 export interface SchemaNode {
   name: string;
-  tables: TableNode[];
+  objects: SchemaObjectNode[];
+}
+
+interface LoadedCatalog {
+  catalog: CompletionCatalog;
+  schemaTree: SchemaNode[];
+  warning?: string;
 }
 
 async function tryQuery(sql: string, params?: unknown[]): Promise<{ rows: Record<string, unknown>[] } | null> {
@@ -453,7 +459,15 @@ function metadataKey(...parts: (string | undefined)[]): string {
   return parts.map((part) => (part ?? '').trim().toUpperCase()).join('\u001f');
 }
 
-async function loadCatalog(database: string): Promise<{ catalog: CompletionCatalog; warning?: string }> {
+function normalizeObjectKind(value: string): string {
+  return value.trim().replace(/[\s_-]+/g, ' ').toUpperCase() || 'OTHER';
+}
+
+function isRelationObject(kind: string): boolean {
+  return ['TABLE', 'VIEW', 'MATERIALIZED VIEW', 'EXTERNAL TABLE', 'SYNONYM'].includes(kind);
+}
+
+async function loadCatalog(database: string): Promise<LoadedCatalog> {
   const db = database.trim();
   const warnings: string[] = [];
 
@@ -484,35 +498,64 @@ async function loadCatalog(database: string): Promise<{ catalog: CompletionCatal
   if (schemaNames.length === 0) {
     return {
       catalog: { database: db, schemas: [] },
+      schemaTree: [],
       warning: 'No schemas found. Check SELECT rights on the catalog or run a query manually.'
     };
   }
 
-  // 2) Tables + views per schema via DB-qualified _V_OBJECT_DATA (single query each).
+  // 2) All object types per schema via DB-qualified _V_OBJECT_DATA.
+  // Keep relations in CompletionCatalog for SQL completion, while retaining
+  // every catalog object for the schema browser.
   const schemas: CompletionCatalog['schemas'] = [];
+  const schemaTree: SchemaNode[] = [];
   for (const schema of schemaNames.slice(0, 60)) {
     const objs = await tryQuery(
       `SELECT OBJNAME AS name, OBJTYPE AS type FROM ${qualifyView(db, '_V_OBJECT_DATA')} ` +
         `WHERE ${eqI('DBNAME', db)} AND ${eqI('SCHEMA', schema)} ` +
-        `AND OBJTYPE IN ('TABLE', 'VIEW', 'SYNONYM', 'EXTERNAL TABLE') ORDER BY 1 LIMIT 1000`
+        `ORDER BY 2, 1 LIMIT 2000`
     );
     if (!objs) {
       warnings.push(`Cannot list objects in schema ${schema}.`);
       schemas.push({ name: schema, tables: [] });
+      schemaTree.push({ name: schema, objects: [] });
       continue;
     }
+    // _V_OBJECT_DATA exposes the object type, while _V_PROCEDURE keeps the
+    // callable signature. Use the latter when available so overloaded
+    // procedures do not collapse into one indistinguishable browser entry.
+    const procedureDetails = await tryQuery(
+      `SELECT PROCEDURESIGNATURE AS name, 'PROCEDURE' AS type FROM ${qualifyView(db, '_V_PROCEDURE')} ` +
+        `WHERE ${eqI('DATABASE', db)} AND ${eqI('SCHEMA', schema)} ` +
+        `ORDER BY 1 LIMIT 1000`
+    );
+    const objectRows = procedureDetails
+      ? [
+          ...objs.rows.filter((row) => normalizeObjectKind(pick(row, 'type', 'OBJTYPE', 'objtype')) !== 'PROCEDURE'),
+          ...procedureDetails.rows
+        ]
+      : objs.rows;
     const tables: CompletionCatalog['schemas'][number]['tables'] = [];
-    for (const r of objs.rows) {
+    const objects: SchemaObjectNode[] = [];
+    const seen = new Set<string>();
+    for (const r of objectRows) {
       const name = pick(r, 'name', 'OBJNAME', 'objname');
       if (!name) continue;
-      const t = pick(r, 'type', 'OBJTYPE', 'objtype').toUpperCase();
-      tables.push({ name, kind: t === 'VIEW' ? 'VIEW' : 'TABLE', schema, columns: [] });
+      const kind = normalizeObjectKind(pick(r, 'type', 'OBJTYPE', 'objtype'));
+      const key = `${kind}\u001f${name.toUpperCase()}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      objects.push({ name, kind, columns: [] });
+      if (isRelationObject(kind)) {
+        tables.push({ name, kind: kind === 'VIEW' || kind === 'MATERIALIZED VIEW' ? 'VIEW' : 'TABLE', schema, columns: [] });
+      }
     }
     schemas.push({ name: schema, tables: tables.slice(0, 1000) });
+    schemaTree.push({ name: schema, objects: objects.slice(0, 2000) });
   }
 
   return {
     catalog: { database: db, schemas },
+    schemaTree,
     warning: warnings.length > 0 ? warnings.join(' ') : undefined
   };
 }
@@ -545,12 +588,56 @@ export async function getSchemaTree(): Promise<{ schemas: SchemaNode[]; warning?
   const loaded = await loadCatalog(db);
   catalogCache.set(metadataKey(db), loaded.catalog);
   return {
-    schemas: loaded.catalog.schemas.map((schema) => ({
-      name: schema.name,
-      tables: schema.tables.map((table) => ({ name: table.name, kind: table.kind, columns: [] }))
-    })),
+    schemas: loaded.schemaTree,
     warning: loaded.warning
   };
+}
+
+export async function getObjectDefinition(
+  schema: string,
+  name: string,
+  kind: 'VIEW' | 'PROCEDURE',
+  database = connectedDb() ?? ''
+): Promise<{ ok: true; content: string } | { ok: false; message: string }> {
+  const db = database.trim();
+  const objectName = name.trim();
+  const schemaName = schema.trim();
+  if (!db || !schemaName || !objectName || !isConnected()) {
+    return { ok: false, message: 'Connect to the database before opening an object definition.' };
+  }
+
+  if (kind === 'VIEW') {
+    const result = await tryQuery(
+      `SELECT DEFINITION AS definition FROM ${qualifyView(db, '_V_VIEW')} ` +
+        `WHERE ${eqI('DATABASE', db)} AND ${eqI('SCHEMA', schemaName)} AND ${eqI('VIEWNAME', objectName)} LIMIT 1`
+    );
+    const definition = result?.rows[0] ? pick(result.rows[0], 'definition', 'DEFINITION') : '';
+    return definition
+      ? { ok: true, content: definition }
+      : { ok: false, message: `Definition for view ${schemaName}.${objectName} was not found.` };
+  }
+
+  const procedureBaseName = objectName.replace(/\s*\(.*/, '').trim();
+  const procedurePredicate = objectName.includes('(')
+    ? ` AND (${eqI('PROCEDURESIGNATURE', objectName)} OR ${eqI('PROCEDURE', procedureBaseName)})`
+    : ` AND ${eqI('PROCEDURE', objectName)}`;
+  const result = await tryQuery(
+    `SELECT PROCEDURESIGNATURE AS signature, RESULT AS returns, PROCEDURESOURCE AS source ` +
+      `FROM ${qualifyView(db, '_V_PROCEDURE')} ` +
+      `WHERE ${eqI('DATABASE', db)} AND ${eqI('SCHEMA', schemaName)}${procedurePredicate} LIMIT 1`
+  );
+  const row = result?.rows[0];
+  const source = row ? pick(row, 'source', 'PROCEDURESOURCE') : '';
+  const signature = row ? pick(row, 'signature', 'PROCEDURESIGNATURE') : '';
+  const returns = row ? pick(row, 'returns', 'RETURNS') : '';
+  const metadata = [
+    `-- ${schemaName}.${objectName}`,
+    signature ? `-- Signature: ${signature}` : '',
+    returns ? `-- Returns: ${returns}` : ''
+  ].filter(Boolean).join('\n');
+  return source
+    ? { ok: true, content: `${metadata}\n\n${source}` }
+    : { ok: false, message: `Source for procedure ${schemaName}.${objectName} was not found.` };
 }
 
 async function loadColumns(database: string, schema: string | undefined, table: string): Promise<ColumnNode[]> {

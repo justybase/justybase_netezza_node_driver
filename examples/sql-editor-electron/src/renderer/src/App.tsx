@@ -388,10 +388,30 @@ export default function App() {
     updateActiveTab((current) => ({ ...current, sql: `SELECT *\nFROM "${schema}"."${table}"\nLIMIT 100;\n`, dirty: true, pane: 'results' }));
   };
 
+  const previewObject = async (schema: string, name: string, kind: 'VIEW' | 'PROCEDURE') => {
+    if (!hasBridge()) {
+      setToast({ tone: 'error', message: 'Electron bridge (window.nz) is missing.' });
+      return;
+    }
+    try {
+      const response = await window.nz.objectDefinition({ database: connInfo?.database, schema, name, kind });
+      if (!response.ok) {
+        setToast({ tone: 'error', message: response.message });
+        return;
+      }
+      const tab = createSqlTab(`${kind} ${schema}.${name}`, response.content);
+      setSqlTabs((current) => [...current, tab]);
+      setActiveSqlTabId(tab.id);
+      setToast({ tone: 'success', message: `${kind} definition opened in a new tab.` });
+    } catch (cause) {
+      setToast({ tone: 'error', message: cause instanceof Error ? cause.message : String(cause) });
+    }
+  };
+
   const loadTableColumns = useCallback(async (schema: string, table: string): Promise<NzColumn[]> => {
     try {
       const columns = await window.nz.columns({ database: connInfo?.database, schema, table });
-      setSchemas((current) => current.map((entry) => entry.name !== schema ? entry : { ...entry, tables: entry.tables.map((item) => item.name !== table ? item : { ...item, columns }) }));
+      setSchemas((current) => current.map((entry) => entry.name !== schema ? entry : { ...entry, objects: entry.objects.map((item) => item.name !== table ? item : { ...item, columns }) }));
       return columns;
     } catch (cause) {
       setToast({ tone: 'error', message: cause instanceof Error ? cause.message : String(cause) });
@@ -435,7 +455,7 @@ export default function App() {
 
       <div className="flex min-h-0 flex-1">
         <aside className="hidden w-[300px] shrink-0 border-r border-slate-800 bg-slate-900/40 md:block">
-          <SchemaBrowser schemas={schemas} loading={schemaLoading} connected={connected} warning={schemaWarning} onRefresh={refreshSchema} onPickTable={pickTable} onShowColumns={showColumns} onLoadColumns={loadTableColumns} />
+          <SchemaBrowser schemas={schemas} loading={schemaLoading} connected={connected} warning={schemaWarning} onRefresh={refreshSchema} onPickTable={pickTable} onShowColumns={showColumns} onLoadColumns={loadTableColumns} onPreviewObject={previewObject} />
         </aside>
 
         <main className="flex min-w-0 flex-1 flex-col">
