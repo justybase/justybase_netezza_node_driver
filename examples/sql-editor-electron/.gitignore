@@ -1,0 +1,18 @@
+# Electron
+out/
+dist/
+release/
+node_modules/
+
+# Vite
+*.local
+
+# Env / secrets — never commit real passwords
+.env
+.env.*.local
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

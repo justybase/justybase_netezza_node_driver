@@ -20,7 +20,7 @@ coverage/
 # Build output
 dist/
 build/
-lib/
+/lib/
 out/
 esm/
 cjs/

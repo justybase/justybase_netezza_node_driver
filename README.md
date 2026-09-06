@@ -29,6 +29,19 @@ npm install @justybase/netezza-driver
 
 Requires Node.js **>= 22.0.0**.
 
+## Example application
+
+The repository includes a standalone [Electron SQL Editor example](examples/sql-editor-electron/README.md)
+that demonstrates this driver in a small desktop application. It keeps all
+Netezza communication in Electron's main process and showcases connections,
+schema browsing, SQL completion, multiple result sets, filtering/grouping,
+CSV/XLSX/XLSB import and export, and query cancellation.
+
+The example has its own dependencies and build workflow; it is not included in
+the published driver package. The Electron workflow builds unsigned macOS
+(x64/arm64), Linux (x64), and Windows (x64) installers and archives as GitHub
+Actions artifacts.
+
 ## Quick Start
 
 ```typescript

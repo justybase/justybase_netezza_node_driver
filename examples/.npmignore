@@ -1,0 +1,4 @@
+# Safety net: examples NEVER enter the NPM package.
+# The root package.json uses a "files" whitelist, so this file is
+# redundant — but it protects in case someone ever switches to a blacklist.
+**/*

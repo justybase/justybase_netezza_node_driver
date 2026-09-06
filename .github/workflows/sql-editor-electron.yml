@@ -1,0 +1,78 @@
+name: Build SQL Editor Electron
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sql-editor-electron-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  package:
+    name: ${{ matrix.platform }}-${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux
+            arch: x64
+            runner: ubuntu-latest
+            script: dist:linux
+          - platform: windows
+            arch: x64
+            runner: windows-latest
+            script: dist:win
+          - platform: macos
+            arch: x64
+            runner: macos-latest
+            script: dist:mac
+          - platform: macos
+            arch: arm64
+            runner: macos-latest
+            script: dist:mac
+
+    defaults:
+      run:
+        working-directory: examples/sql-editor-electron
+
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Use Node.js 22
+        uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: examples/sql-editor-electron/package-lock.json
+
+      - name: Install example dependencies
+        run: npm ci
+
+      - name: Typecheck example
+        run: npm run typecheck
+
+      - name: Run generated import tests
+        run: npm run test:import
+
+      - name: Build installer and archive
+        run: npm run ${{ matrix.script }} -- --${{ matrix.arch }}
+
+      - name: Upload Electron artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: sql-editor-electron-${{ matrix.platform }}-${{ matrix.arch }}
+          path: examples/sql-editor-electron/release/*
+          if-no-files-found: error
+          retention-days: 14

@@ -1,0 +1,21 @@
+appId: com.justybase.netezza-sql-editor
+productName: Netezza SQL Editor
+directories:
+  output: release
+files:
+  - out/**/*
+  - package.json
+mac:
+  target:
+    - dmg
+    - zip
+  identity: null
+win:
+  target:
+    - nsis
+    - zip
+linux:
+  target:
+    - AppImage
+    - tar.gz
+  category: Development

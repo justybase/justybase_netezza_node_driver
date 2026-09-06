@@ -1,0 +1,45 @@
+{
+  "name": "netezza-sql-editor-example",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Example 1: small SQL editor for Netezza (Electron + Monaco + TanStack Table). Demonstrates @justybase/netezza-driver usage.",
+  "license": "Apache-2.0",
+  "author": "JustyBase",
+  "main": "./out/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview",
+    "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
+    "test:import": "node --experimental-strip-types --test tests/import.e2e.test.ts",
+    "dist": "npm run build && electron-builder --dir --publish never",
+    "dist:win": "npm run build && electron-builder --win --publish never",
+    "dist:linux": "npm run build && electron-builder --linux --publish never",
+    "dist:mac": "npm run build && electron-builder --mac --publish never"
+  },
+  "dependencies": {
+    "@justybase/netezza-driver": "^3.1.0",
+    "@justybase/spreadsheet-tasks": "^2.1.1",
+    "@tanstack/react-table": "^8.21.3",
+    "monaco-editor": "^0.52.2",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0",
+    "@vitejs/plugin-react": "^4.3.4",
+    "autoprefixer": "^10.4.20",
+    "electron": "^37.2.0",
+    "electron-builder": "^26.0.12",
+    "electron-vite": "^3.1.0",
+    "postcss": "^8.4.49",
+    "tailwindcss": "^3.4.17",
+    "typescript": "~5.6.3",
+    "vite": "^6.3.5"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  }
+}
