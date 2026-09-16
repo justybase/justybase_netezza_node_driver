@@ -258,7 +258,7 @@ This driver exposes both a pg-style buffered `query()` API and ADO.NET-inspired 
 
 Important: this project is an independent TypeScript implementation and does not reuse code from the `node-netezza` package. The functional and architectural inspiration comes from the C# implementation referenced above.
 
-> **Note**: The `node-netezza` package is included for **benchmarking**, and `odbc` is included for **testing** compatibility.
+> **Note**: The `node-netezza` package is included for **benchmarking**. The primary live compatibility reference is the C# `JustyBase.NetezzaDriver`.
 
 ## Testing
 
@@ -317,7 +317,28 @@ npm test
 npm run test:smoke
 ```
 
-See [LINUX_ODBC_FIX.md](LINUX_ODBC_FIX.md) if ODBC comparison tests fail on Linux due to encoding issues in `node-odbc`.
+### C# Reference Compatibility
+
+The live compatibility tests compare this driver with
+`JustyBase.NetezzaDriver` 1.7.2, without requiring ODBC or native bindings:
+
+```bash
+dotnet --version
+npm run test:reference       # smoke: 16 queries, one C# process
+npm run test:reference:full  # full: ~700 queries ported from the old ODBC suite
+```
+
+The reference runner targets .NET 10 and emits typed JSON values, so large
+`BIGINT` and `NUMERIC` values are compared without JavaScript number rounding.
+Batch mode (`--batch`) reuses a single C# process and connection for many
+queries. Comparison is strict (column names + values) with a closed list of
+representation equivalences in `tests/helpers/csharpReference.js` (float32
+print format, 28-digit decimal limit, empty-string vs null quirk of the C#
+driver, read-time timestamp skew); skipped queries live in `knownDivergences`
+in `tests/CSharpComparison.test.js`.
+The full suite needs a live server plus `dotnet` and stays local-only — it is
+excluded from `npm run test:full` and from CI. The legacy ODBC comparison
+suites were removed; C# is the sole live compatibility reference.
 
 ### Full Tests (Thorough)
 

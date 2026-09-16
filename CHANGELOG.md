@@ -5,7 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [3.2.0] - 2026-09-16
+
+### Added
+- C# reference runner batch mode (`tools/csharp-reference --batch`): one
+  process and one connection for many queries, with per-query error capture.
+- Full C# compatibility suite (`tests/CSharpComparison.test.js`,
+  `npm run test:reference:full`) porting the ~700-query ODBC corpus
+  (`tests/helpers/referenceQueries.js`) with strict column/value comparison
+  plus a closed list of representation equivalences (float32 print format,
+  28-digit decimal limit, empty-string vs null, timestamp skew).
+- Shared `tests/helpers/csharpReference.js` used by both the smoke and full
+  C# suites (single build, batched runs, typed-JSON normalization).
+
+### Removed
+- Legacy ODBC compatibility suites (`tests/OdbcComparison.test.js`,
+  `tests/OdbcComparison.smoke.test.js`, `tests/BenchmarkODBCvsNative.test.js`)
+  and the `odbc` dev dependency; C# `JustyBase.NetezzaDriver` is now the sole
+  live compatibility reference.
+- `LINUX_ODBC_FIX.md` and the ODBC-only example tools
+  (`tools/examples/verify_driver.js`, `tools/examples/benchmark_comparison.js`).
 
 ## [3.1.0] - 2026-09-05
 

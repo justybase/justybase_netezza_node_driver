@@ -4,15 +4,28 @@ const { NzDatabaseError } = require('../dist/cjs/errors/NzDatabaseError');
 const { BackendMessageCode } = require('../dist/cjs/protocol/constants');
 
 class ReadSocket extends EventEmitter {
-    constructor(bytes) {
+    constructor(bytes, options = {}) {
         super();
         this.destroyed = false;
         this.chunks = [Buffer.from(bytes)];
         this.writes = [];
+        // When set, exhausting the buffer signals end/close like a real socket,
+        // so tests can assert the behaviour on a truncated stream.
+        this.signalEof = options.signalEof === true;
     }
 
     read() {
-        return this.chunks.shift() || null;
+        if (this.chunks.length === 0) {
+            if (this.signalEof) {
+                setImmediate(() => {
+                    this.destroyed = true;
+                    this.emit('close');
+                    this.emit('end');
+                });
+            }
+            return null;
+        }
+        return this.chunks.shift();
     }
 
     unshift(chunk) {
@@ -31,8 +44,8 @@ function int32(value) {
     return buffer;
 }
 
-function createHandshake(bytes) {
-    const socket = new ReadSocket(bytes);
+function createHandshake(bytes, options = {}) {
+    const socket = new ReadSocket(bytes, options);
     const handshake = new Handshake(socket, socket, 'host');
     return { handshake, socket };
 }
@@ -67,6 +80,58 @@ describe('Handshake protocol framing', () => {
         );
 
         await expect(handshake.connConnectionComplete()).rejects.toThrow(/password authentication failed/i);
+    });
+
+    // Some Netezza versions frame the legacy text as a zero frame length
+    // followed by the message; the text itself is still NUL-terminated.
+    test('preserves a legacy FATAL text ErrorResponse with an empty frame length', async () => {
+        const message = 'FATAL 1: access denied: user is not authorized\0';
+        const { handshake } = createHandshake(
+            Buffer.concat([Buffer.from([BackendMessageCode.ErrorResponse]), Buffer.alloc(4), Buffer.from(message)])
+        );
+
+        await expect(handshake.connConnectionComplete()).rejects.toBeInstanceOf(NzDatabaseError);
+        await expect(
+            createHandshake(
+                Buffer.concat([Buffer.from([BackendMessageCode.ErrorResponse]), Buffer.alloc(4), Buffer.from(message)])
+            ).handshake.connConnectionComplete()
+        ).rejects.toThrow(/FATAL 1: access denied/);
+    });
+
+    test('rejects an empty ErrorResponse frame without a legacy text payload', async () => {
+        const { handshake } = createHandshake(
+            Buffer.concat([Buffer.from([BackendMessageCode.ErrorResponse]), Buffer.alloc(4), Buffer.from([0x01])])
+        );
+
+        await expect(handshake.connConnectionComplete()).rejects.toThrow(/connectionCompleteErrorFrameLength/);
+    });
+
+    test('does not mistake the next message for an empty-frame legacy error', async () => {
+        // A malformed zero frame length followed by ReadyForQuery: the type byte
+        // alone must not be classified as a legacy database error.
+        const { handshake } = createHandshake(
+            Buffer.concat([
+                Buffer.from([BackendMessageCode.ErrorResponse]),
+                Buffer.alloc(4),
+                Buffer.from([BackendMessageCode.ReadyForQuery]),
+                int32(5)
+            ])
+        );
+
+        await expect(handshake.connConnectionComplete()).rejects.toThrow(/connectionCompleteErrorFrameLength/);
+    });
+
+    test('rejects a truncated empty-frame legacy error without hanging', async () => {
+        const { handshake } = createHandshake(
+            Buffer.concat([
+                Buffer.from([BackendMessageCode.ErrorResponse]),
+                Buffer.alloc(4),
+                Buffer.from('FATAL 1: truncated without terminator')
+            ]),
+            { signalEof: true }
+        );
+
+        await expect(handshake.connConnectionComplete()).rejects.toThrow(/connectionCompleteErrorFrameLength/);
     });
 
     test('rejects invalid NoticeResponse length during connection completion', async () => {

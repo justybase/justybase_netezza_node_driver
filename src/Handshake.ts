@@ -18,6 +18,34 @@ import createDebug from 'debug';
 
 const debug = createDebug('nz:handshake');
 
+/**
+ * Upper bound for a legacy (length-less) error text, so a malformed frame can
+ * never make us buffer an unbounded amount of data looking for a terminator.
+ */
+const MAX_LEGACY_ERROR_TEXT_BYTES = 4096;
+
+/**
+ * A legacy error text is a message, not a stray byte. Shorter payloads are
+ * treated as malformed framing (see `_readLegacyConnectionErrorText`).
+ */
+const MIN_LEGACY_ERROR_TEXT_CHARS = 4;
+
+/**
+ * The legacy format is only recognised when the four bytes read as a frame
+ * length are printable ASCII: a real message prefix ("Pass", "FATA", ...)
+ * never contains a control byte or a high byte. Malformed binary lengths must
+ * still fail closed in the length validation below.
+ */
+const isPrintableAscii = (byte: number): boolean => byte >= 0x20 && byte <= 0x7e;
+
+/**
+ * Bytes accepted inside a legacy error text: printable ASCII, the common
+ * whitespace control bytes and UTF-8 continuation bytes. Other control bytes
+ * mean the payload is binary data rather than a text error.
+ */
+const isLegacyErrorTextByte = (byte: number): boolean =>
+    byte >= 0x20 ? byte !== 0x7f : byte === 0x09 || byte === 0x0a || byte === 0x0d;
+
 interface HandshakeOptions {
     securityLevel?: 'PreferredUnsecured' | 'OnlyUnsecuredSession' | 'PreferredSecuredSession' | 'OnlySecuredSession';
     sslCerFilePath?: string;
@@ -478,6 +506,74 @@ class Handshake {
         return Buffer.from(chars).toString('utf8');
     }
 
+    /**
+     * Reads a NUL-terminated legacy error text, starting at the next byte.
+     *
+     * Returns null when the bytes cannot be such a text: a control byte, no
+     * terminator before the connection ends, more than
+     * `MAX_LEGACY_ERROR_TEXT_BYTES`, or fewer than `minChars` characters. The
+     * caller then falls back to the strict frame length validation, so a dead
+     * or truncated stream reports a deterministic protocol error instead of a
+     * generic socket error or a bogus database error.
+     */
+    private async _readLegacyErrorText(
+        minChars: number,
+        isAllowedByte: (byte: number) => boolean
+    ): Promise<string | null> {
+        const chars: number[] = [];
+        while (true) {
+            let byte: number;
+            try {
+                byte = await this.readByte();
+            } catch (e) {
+                debug('Legacy error text could not be read', e);
+                return null;
+            }
+            if (byte === 0) break;
+            if (!isAllowedByte(byte)) return null;
+            if (chars.length >= MAX_LEGACY_ERROR_TEXT_BYTES) return null;
+            chars.push(byte);
+        }
+        if (chars.length < minChars) return null;
+        return Buffer.from(chars).toString('utf8');
+    }
+
+    /**
+     * Detects the legacy Netezza error format that some versions use when a
+     * connection cannot be completed: a NUL-terminated text message where an
+     * ErrorResponse frame would normally be.
+     *
+     * Two framings are seen in the wild:
+     *  - no length field at all, so the first four characters of the message
+     *    (for example "Pass" in "Password authentication failed") are read as
+     *    the frame length and look like an absurd int32 value;
+     *  - a zero frame length followed by the text.
+     *
+     * Both are accepted only when the payload actually looks like text. Anything
+     * else must fail closed in `validateProtocolLengthAfterOverhead`: a malformed
+     * frame that is reported as `NzDatabaseError` would skip the reconnect path
+     * driven by `NzProtocolError`.
+     *
+     * Returns the legacy message, or null when the regular frame handling must
+     * run instead.
+     */
+    private async _readLegacyConnectionErrorText(lenBuf: Buffer, len: number): Promise<string | null> {
+        if (lenBuf.every(isPrintableAscii)) {
+            const rest = await this._readLegacyErrorText(0, isLegacyErrorTextByte);
+            return rest === null ? null : lenBuf.toString('utf8') + rest;
+        }
+
+        if (len !== 0) return null;
+
+        // The zero length framing is ambiguous, so require a full message: a
+        // single printable byte is usually the type byte of the next message
+        // (e.g. 'Z' of ReadyForQuery) when the frame was malformed. This does
+        // consume bytes before the length validation runs, which is safe
+        // because a null result always ends in a protocol error that tears the
+        // connection down.
+        return this._readLegacyErrorText(MIN_LEGACY_ERROR_TEXT_CHARS, isPrintableAscii);
+    }
+
     async connConnectionComplete(): Promise<boolean> {
         while (true) {
             const beresp = await this.readByte();
@@ -492,19 +588,8 @@ class Handshake {
                 const lenBuf = await this.readBytes(4);
                 const len = PGUtil.readInt32(lenBuf);
 
-                // Some Netezza versions return a legacy, NUL-terminated text
-                // error here instead of a length-prefixed ErrorResponse body.
-                // The first four characters (for example, "Pass") therefore
-                // look like an absurd frame length when interpreted as int32.
-                // Only accept this compatibility form when all four bytes are
-                // printable ASCII; binary malformed lengths must still fail
-                // closed below.
-                const isLegacyTextPrefix = lenBuf.every((byte) => byte >= 0x20 && byte <= 0x7e);
-                if (isLegacyTextPrefix) {
-                    let legacyMessage = lenBuf.toString('utf8');
-                    legacyMessage += await this.readString();
-                    throw createNzDatabaseError(legacyMessage);
-                }
+                const legacyText = await this._readLegacyConnectionErrorText(lenBuf, len);
+                if (legacyText !== null) throw createNzDatabaseError(legacyText);
 
                 const bodyLength = validateProtocolLengthAfterOverhead(
                     len,

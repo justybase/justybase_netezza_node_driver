@@ -13,13 +13,14 @@ module.exports = {
     maxWorkers: 1,
     testTimeout: 120000,
     setupFilesAfterEnv: [],
-    testMatch: [
-        '**/tests/**/*.test.js',
-        '**/tests/**/*.unit.test.js',
-    ],
+    testMatch: ['**/tests/**/*.test.js', '**/tests/**/*.unit.test.js'],
     testPathIgnorePatterns: [
         '/node_modules/',
         '/dist/',
+        // Local-only C# reference full suite (~700 live queries, needs NZ + dotnet).
+        // Run explicitly via `npm run test:reference:full` (it overrides this
+        // ignore via --testPathIgnorePatterns).
+        '/tests/CSharpComparison\\.test\\.js$',
     ],
     moduleNameMapper: {},
     // Tests intentionally load the built CommonJS package. Measure the code
