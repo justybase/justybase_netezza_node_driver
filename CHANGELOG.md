@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.2.1] - 2026-09-17
+
+### Added
+- `NzConnection.inTransaction` exposes whether the session is inside an
+  explicit transaction. Netezza does not report the transaction status in
+  `ReadyForQuery`, so it is tracked from the statements the driver sends; the
+  scan ignores string literals, quoted identifiers, dollar-quoted and
+  `AS BEGIN_PROC ... END_PROC` bodies, and comments.
+- `NzPool` option `rollbackOnRelease` (default `true`): a connection released
+  while an explicit transaction is open is rolled back before it returns to the
+  idle queue. Set it to `false` to restore the previous, pass-through release.
+- Tests: `tests/TransactionTracking.unit.test.js`,
+  `tests/PoolTransaction.unit.test.js`, and new live pool cases in
+  `tests/NzPoolTests.smoke.test.js`.
+
+### Fixed
+- `NzPool.query()` / `NzPool.executeNonQuery()` no longer destroy a healthy
+  connection when a statement fails with a SQL error. Only protocol faults and
+  socket failures remove the client; a `NzDatabaseError` keeps the session,
+  which avoids a full reconnect (and a new backend session) after every
+  mistyped table or column name.
+
 ## [3.2.0] - 2026-09-16
 
 ### Added

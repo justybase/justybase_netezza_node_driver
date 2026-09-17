@@ -1,4 +1,5 @@
 const { NzDataReader } = require('../dist/cjs/NzDataReader');
+const { NzDatabaseError } = require('../dist/cjs/errors/NzDatabaseError');
 
 const INT_COLUMN = { name: 'value', typeOid: 23, typeMod: -1, typeLen: 4 };
 
@@ -352,10 +353,17 @@ describe('NzDataReader CommandComplete result boundaries', () => {
     });
 
     test('surfaces an error encountered while moving to the next result', async () => {
+        const error = new NzDatabaseError({
+            severity: 'ERROR',
+            code: '42601',
+            message: 'next statement failed',
+            detail: 'test detail',
+            raw: 'SERROR\0C42601\0Mnext statement failed\0Dtest detail\0\0',
+        });
         const reader = createReader(
             [
                 { type: 'CommandComplete' },
-                { type: 'ErrorResponse', message: 'next statement failed' },
+                { type: 'ErrorResponse', message: error.message, error },
                 { type: 'ReadyForQuery' },
             ],
             { initialNextItem: { type: 'DataRow', row: [1] } }
@@ -363,7 +371,7 @@ describe('NzDataReader CommandComplete result boundaries', () => {
 
         expect(await reader.read()).toBe(true);
         expect(await reader.read()).toBe(false);
-        await expect(reader.nextResult()).rejects.toThrow('next statement failed');
+        await expect(reader.nextResult()).rejects.toBe(error);
         await reader.close();
     });
 });

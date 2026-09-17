@@ -1,6 +1,7 @@
 const { EventEmitter } = require('events');
 const { NzConnection } = require('../dist/cjs/NzConnection');
 const { BackendMessageCode } = require('../dist/cjs/protocol/constants');
+const { NzDatabaseError } = require('../dist/cjs/errors/NzDatabaseError');
 
 class QueuedSocket extends EventEmitter {
     constructor(chunks) {
@@ -46,6 +47,11 @@ function payloadMessage(type, payload, declaredLength = payload.length) {
 
 function readyMessage() {
     return Buffer.concat([Buffer.from([BackendMessageCode.ReadyForQuery]), Buffer.alloc(4)]);
+}
+
+function errorMessage({ code = '42P01', message = 'relation does not exist' } = {}) {
+    const payload = Buffer.from(`SERROR\0C${code}\0M${message}\0\0`);
+    return payloadMessage(BackendMessageCode.ErrorResponse, payload);
 }
 
 function rowDescription() {
@@ -319,6 +325,57 @@ describe('Netezza protocol framing', () => {
         };
 
         await expect(connection._doExecute(connection.createCommand('SELECT 1'))).rejects.toThrow('expected failure');
+        expect(connection._protocolFaulted).toBe(false);
+        await connection.close();
+    });
+
+    test('propagates the structured SQL error code through execute', async () => {
+        const { connection, socket } = createConnection(Buffer.alloc(0));
+        socket.onWrite = () => {
+            socket.chunks.push(errorMessage({ code: '42P01' }), readyMessage());
+            socket.emit('readable');
+        };
+
+        let error;
+        try {
+            await connection._doExecute(connection.createCommand('SELECT * FROM missing_table'));
+        } catch (caught) {
+            error = caught;
+        }
+
+        expect(error).toBeInstanceOf(NzDatabaseError);
+        expect(error.code).toBe('42P01');
+        expect(error.message).toBe('relation does not exist');
+        expect(connection._protocolFaulted).toBe(false);
+        await connection.close();
+    });
+
+    test('propagates the structured SQL error code through executeReader', async () => {
+        const { connection, socket } = createConnection(Buffer.alloc(0));
+        socket.onWrite = () => {
+            socket.chunks.push(errorMessage({ code: '42601', message: 'syntax error' }), readyMessage());
+            socket.emit('readable');
+        };
+
+        await expect(connection.executeReader(connection.createCommand('SELEC 1'))).rejects.toMatchObject({
+            code: '42601',
+            message: 'syntax error',
+        });
+        expect(connection._protocolFaulted).toBe(false);
+        await connection.close();
+    });
+
+    test('propagates the structured SQL error code through buffered query', async () => {
+        const { connection, socket } = createConnection(Buffer.alloc(0));
+        socket.onWrite = () => {
+            socket.chunks.push(errorMessage({ code: '42703', message: 'column does not exist' }), readyMessage());
+            socket.emit('readable');
+        };
+
+        await expect(connection.query('SELECT missing_column')).rejects.toMatchObject({
+            code: '42703',
+            message: 'column does not exist',
+        });
         expect(connection._protocolFaulted).toBe(false);
         await connection.close();
     });

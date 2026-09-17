@@ -76,4 +76,80 @@ describeNz('NzPool Tests', () => {
 
         expect(pool.idleCount).toBe(2);
     }, 30000);
+
+    test('keeps a healthy session after a SQL error instead of reconnecting', async () => {
+        const removed = [];
+        pool.on('remove', (client) => removed.push(client));
+
+        const { client, release } = await pool.connect();
+        await client.execute('CREATE TEMP TABLE POOL_KEEP_ALIVE (X INT)');
+        await client.execute('INSERT INTO POOL_KEEP_ALIVE VALUES (1)');
+        release();
+
+        await expect(pool.query('SELECT * FROM NO_SUCH_TABLE_XYZ')).rejects.toThrow(/relation does not exist/i);
+
+        // A clean SQL failure must not tear the connection down.
+        expect(pool.totalCount).toBe(1);
+        expect(pool.idleCount).toBe(1);
+        expect(removed).toHaveLength(0);
+
+        // TEMP tables are session-scoped, so finding the row proves the same
+        // backend session was reused rather than reconnected.
+        const result = await pool.query('SELECT X FROM POOL_KEEP_ALIVE');
+        expect(result.rowCount).toBe(1);
+        expect(Number(result.rows[0].X ?? result.rows[0].x)).toBe(1);
+    }, 30000);
+
+    test('rolls back an open transaction before the next checkout', async () => {
+        // max: 1 forces the next checkout to wait for the recycling connection
+        // instead of growing the pool with a fresh session.
+        const single = new NzPool({ ...config, max: 1 });
+        try {
+            const first = await single.connect();
+            await first.client.execute('CREATE TEMP TABLE POOL_TX_PROBE (X INT)');
+            expect(first.client.inTransaction).toBe(false);
+
+            await first.client.execute('BEGIN');
+            expect(first.client.inTransaction).toBe(true);
+            await first.client.execute('INSERT INTO POOL_TX_PROBE VALUES (1)');
+            expect(await countRows(first.client, 'POOL_TX_PROBE')).toBe(1);
+            first.release();
+
+            // Not reusable until the rollback has run.
+            expect(single.idleCount).toBe(0);
+
+            const second = await single.connect();
+            // Same session, but the transaction must have been closed.
+            expect(second.client).toBe(first.client);
+            expect(second.client.inTransaction).toBe(false);
+            expect(await countRows(second.client, 'POOL_TX_PROBE')).toBe(0);
+            second.release();
+        } finally {
+            await single.end();
+        }
+    }, 30000);
+
+    test('tracks transaction state for statements issued directly', async () => {
+        const { client, release } = await pool.connect();
+
+        await client.execute('BEGIN');
+        expect(client.inTransaction).toBe(true);
+        await client.execute('COMMIT');
+        expect(client.inTransaction).toBe(false);
+
+        await client.execute('BEGIN');
+        await client.query('SELECT 1 AS n');
+        expect(client.inTransaction).toBe(true);
+        await client.rollback();
+        expect(client.inTransaction).toBe(false);
+
+        release();
+    }, 30000);
 });
+
+/** COUNT(*) comes back as a BIGINT, so it is normalized for comparisons. */
+async function countRows(client, table) {
+    const result = await client.query(`SELECT COUNT(*) AS N FROM ${table}`);
+    const row = result.rows[0];
+    return Number(row.N ?? row.n);
+}
