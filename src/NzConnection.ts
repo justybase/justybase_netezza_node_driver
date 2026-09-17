@@ -27,6 +27,116 @@ import createDebug from 'debug';
 const debug = createDebug('nz:connection');
 
 /**
+ * A statement that opens an explicit transaction. Anchored at the start of a
+ * statement so that `BEGIN_PROC`, `CASE ... END` and similar text cannot match.
+ */
+const TRANSACTION_START_KEYWORD = /^(?:begin|start\s+transaction)\b/i;
+
+/** A statement that ends an explicit transaction (`END`/`ABORT` are COMMIT/ROLLBACK synonyms). */
+const TRANSACTION_END_KEYWORD = /^(?:commit|rollback|end|abort)\b/i;
+
+/**
+ * Splits `sql` into statements, blanking out every region whose content is not
+ * SQL syntax: string literals, quoted identifiers, dollar-quoted bodies and
+ * comments.
+ *
+ * A plain `split(';')` is not usable here: a `;` inside a literal or a routine
+ * body would start a fragment that begins with text such as `COMMIT')`, which
+ * would then be read as a real transaction boundary. Quoting rules mirror
+ * `substituteParameters` so both halves of the driver agree on what a literal
+ * or a body is.
+ */
+function splitStatements(sql: string): string[] {
+    const statements: string[] = [];
+    let current = '';
+    let i = 0;
+
+    while (i < sql.length) {
+        const ch = sql[i];
+
+        if (ch === "'" || ch === '"') {
+            const quote = ch;
+            i++;
+            while (i < sql.length) {
+                if (ch === "'" && sql[i] === '\\' && i + 1 < sql.length) {
+                    i += 2;
+                    continue;
+                }
+                if (sql[i] !== quote) {
+                    i++;
+                    continue;
+                }
+                if (sql[i + 1] === quote) {
+                    i += 2; // doubled quote ('' or "")
+                    continue;
+                }
+                i++;
+                break;
+            }
+            current += ' ';
+            continue;
+        }
+
+        // Netezza procedural body without dollar quoting:
+        // `AS BEGIN_PROC ... END_PROC`. Its inner `;` and `END;` belong to the
+        // body, so they must not be read as statement or transaction
+        // boundaries. Only a whole word starts a body, and the region is
+        // blanked up to `END_PROC` (or to the end of the text when it is
+        // missing, in which case the statement is malformed anyway).
+        if (
+            (ch === 'b' || ch === 'B') &&
+            !/[A-Za-z0-9_$]/.test(i > 0 ? sql[i - 1] : ' ') &&
+            /^begin_proc\b/i.test(sql.slice(i))
+        ) {
+            const body = sql.slice(i);
+            const endProc = /\bend_proc\b/i.exec(body);
+            i += endProc ? endProc.index + endProc[0].length : body.length;
+            current += ' ';
+            continue;
+        }
+
+        // Dollar-quoted body (`$$...$$` / `$tag$...$tag$`). A numeric suffix is
+        // a parameter, not a tag, so it is left untouched.
+        if (ch === '$') {
+            const tag = sql.slice(i).match(/^\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$/)?.[0];
+            if (tag !== undefined) {
+                const end = sql.indexOf(tag, i + tag.length);
+                i = end === -1 ? sql.length : end + tag.length;
+                current += ' ';
+                continue;
+            }
+        }
+
+        if (ch === '-' && sql[i + 1] === '-') {
+            const lineEnd = sql.indexOf('\n', i);
+            i = lineEnd === -1 ? sql.length : lineEnd;
+            current += ' ';
+            continue;
+        }
+
+        if (ch === '/' && sql[i + 1] === '*') {
+            const commentEnd = sql.indexOf('*/', i + 2);
+            i = commentEnd === -1 ? sql.length : commentEnd + 2;
+            current += ' ';
+            continue;
+        }
+
+        if (ch === ';') {
+            statements.push(current);
+            current = '';
+            i++;
+            continue;
+        }
+
+        current += ch;
+        i++;
+    }
+
+    statements.push(current);
+    return statements;
+}
+
+/**
  * Parse rows affected from Netezza CommandComplete message.
  * Netezza returns patterns like:
  * - "INSERT 0 1" (oid ignored, last number is row count)
@@ -137,6 +247,8 @@ class NzConnection extends EventEmitter {
     private _connected: boolean = false;
     private _protocolFaulted: boolean = false;
     private _closing: boolean = false;
+    /** True while an explicit transaction opened with BEGIN is still open. */
+    private _inTransaction: boolean = false;
     private _rowDescription: ColumnInfo[] | null = null;
     private _textColumnParsers: TextValueParser[] | null = null;
     private _textBufferParsers: (TextBufferParser | null)[] | null = null;
@@ -360,6 +472,10 @@ class NzConnection extends EventEmitter {
                     if (connectionTimedOut) return; // Check again after async handshake
                     clearConnectionTimeout();
                     this._connected = true;
+                    // A new backend session never inherits the previous transaction.
+                    // `close()` already clears this, but a dead socket can be
+                    // reconnected with `connect()` directly, so reset here too.
+                    this._inTransaction = false;
                     this._backendProcessId = handshake.backendProcessId;
                     this._backendSecretKey = handshake.backendSecretKey;
                     resolve();
@@ -451,6 +567,9 @@ class NzConnection extends EventEmitter {
         if (this._closing) {
             return;
         }
+        // The backend session ends with this socket, so its transaction state
+        // must not survive into a later reconnect on the same instance.
+        this._inTransaction = false;
         if (!this._socket || this._socket.destroyed) {
             await this._waitForActiveExecution();
             this._connected = false;
@@ -1075,11 +1194,13 @@ class NzConnection extends EventEmitter {
         }
         this._executing = true;
         this._commandGeneration++;
+        const prevInTransaction = this._inTransaction;
+        let sentQuery: string | null = null;
         try {
             debug('Executing:', command.commandText);
             await this._ensureProtocolSynced(command.commandText);
             this._assertCanExecute();
-            this._preExecution(command);
+            sentQuery = this._preExecution(command);
 
             let error: Error | null = null;
             const notices: string[] = [];
@@ -1105,6 +1226,12 @@ class NzConnection extends EventEmitter {
             if (error) throw error;
             return true;
         } catch (err) {
+            if (sentQuery === null) {
+                // The packet never left: the server state is unchanged.
+                this._inTransaction = prevInTransaction;
+            } else {
+                this._restoreTransactionStateOnError(sentQuery, prevInTransaction);
+            }
             if (err instanceof NzProtocolError) this._markProtocolFault();
             throw err;
         } finally {
@@ -1180,12 +1307,14 @@ class NzConnection extends EventEmitter {
         this._executing = true;
         this._commandGeneration++;
         this._resetDiag();
+        const prevInTransaction = this._inTransaction;
+        let sentQuery: string | null = null;
 
         try {
             debug('Executing Reader:', command.commandText);
             await this._ensureProtocolSynced(command.commandText);
             this._assertCanExecute();
-            this._preExecution(command);
+            sentQuery = this._preExecution(command);
 
             const generator = this._responseGenerator(command);
             let columns: ColumnInfo[] = [];
@@ -1244,20 +1373,95 @@ class NzConnection extends EventEmitter {
                 initialNextItem as GeneratorItem | null
             ) as unknown as NzDataReader<T>;
         } catch (e) {
+            if (sentQuery === null) {
+                this._inTransaction = prevInTransaction;
+            } else {
+                this._restoreTransactionStateOnError(sentQuery, prevInTransaction);
+            }
             if (e instanceof NzProtocolError) this._markProtocolFault();
             this._executing = false;
             throw e;
         }
     }
 
-    private _preExecution(command: NzCommand): void {
+    /**
+     * True while the session is inside an explicit transaction opened with
+     * `BEGIN` / `START TRANSACTION` and not yet ended by `COMMIT` / `ROLLBACK` /
+     * `END` / `ABORT`.
+     *
+     * Netezza does not report the transaction status: `ReadyForQuery` is framed
+     * as `Z` + code + a zero-length payload, with no PostgreSQL-style status
+     * byte. The state is therefore tracked from the statements this driver
+     * sends. Set it defensively: an unnecessary `ROLLBACK` is only a notice on
+     * Netezza, while an unnoticed open transaction would leak to the next
+     * pool checkout.
+     */
+    get inTransaction(): boolean {
+        return this._inTransaction;
+    }
+
+    /**
+     * Parses `sql` for an explicit-transaction boundary.
+     *
+     * Only a transaction-control keyword at the start of a statement counts,
+     * so `CASE ... END` (or `END` inside a procedure body) cannot be mistaken
+     * for a transaction boundary. When a text holds several statements the
+     * last one wins, so multi-statement `BEGIN ... COMMIT` batches settle on
+     * the state they actually leave the session in.
+     */
+    private _parseTransactionState(sql: string): { state: boolean | null; hadStart: boolean } {
+        let state: boolean | null = null;
+        let hadStart = false;
+        for (const statement of splitStatements(sql)) {
+            const text = statement.trim();
+            if (!text) continue;
+            if (TRANSACTION_START_KEYWORD.test(text)) {
+                state = true;
+                hadStart = true;
+            } else if (TRANSACTION_END_KEYWORD.test(text)) state = false;
+        }
+        return { state, hadStart };
+    }
+
+    /**
+     * Updates {@link inTransaction} from the statement text about to be sent.
+     * Returns the pending end-state (`true`/`false`) or `null` when the text
+     * holds no transaction boundary.
+     */
+    private _trackTransactionState(sql: string): boolean | null {
+        const { state } = this._parseTransactionState(sql);
+        if (state !== null) this._inTransaction = state;
+        return state;
+    }
+
+    /**
+     * Repairs {@link inTransaction} after a failed execution whose packet was
+     * already sent. A failed `COMMIT`/`ROLLBACK`/`END`/`ABORT` must not clear
+     * an open transaction, otherwise `NzPool` would skip its rollback-on-release
+     * and hand the still-open transaction to the next checkout. The repair errs
+     * towards the harmless extra `ROLLBACK`: a failed batch that opened a
+     * transaction (`BEGIN ... COMMIT` that never committed) is left marked open.
+     */
+    private _restoreTransactionStateOnError(query: string, prev: boolean): void {
+        const { state, hadStart } = this._parseTransactionState(query);
+        if (state === false) {
+            this._inTransaction = prev || hadStart;
+        } else if (state === null) {
+            this._inTransaction = prev;
+        }
+        // state === true: keep `true` (a failed BEGIN costs one extra ROLLBACK).
+    }
+
+    private _preExecution(command: NzCommand): string {
         const query =
             command.parameters && command.parameters.length > 0
                 ? substituteParameters(command.commandText, command.parameters)
                 : command.commandText;
+        this._trackTransactionState(query);
         this._commandNumber++;
         if (this._commandNumber > 100000) this._commandNumber = 1;
         this._assertReadableStream().write(buildSimpleQueryPacket(query, this._commandNumber));
+        return query;
     }
 
     private async *_responseGenerator(command: NzCommand): AsyncGenerator<ResponseMessage> {

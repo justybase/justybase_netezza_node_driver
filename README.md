@@ -206,6 +206,52 @@ async function runQuery() {
 }
 ```
 
+### Transactions and error handling on release
+
+A checked-out connection that is released while an explicit transaction is
+still open is rolled back before it can be handed to the next caller, so an
+uncommitted transaction (and its uncommitted data) never leaks into another
+checkout. This is controlled by `rollbackOnRelease` (default `true`):
+
+```typescript
+const pool = new NzPool({
+    // ...
+    rollbackOnRelease: true, // default
+});
+
+const { client, release } = await pool.connect();
+try {
+    await client.beginTransaction();
+    await client.execute("INSERT INTO t VALUES (1)");
+    await client.commit();
+} finally {
+    // If the commit above did not run, the pool rolls the transaction back
+    // here before returning the connection to the idle queue.
+    release();
+}
+```
+
+The transaction state is tracked from the statements the driver sends
+(`BEGIN` / `START TRANSACTION` open it, `COMMIT` / `ROLLBACK` / `END` / `ABORT`
+close it). A failed `COMMIT`/`ROLLBACK` keeps the transaction marked open so the
+pool still rolls it back on release.
+Only a statement-initial keyword counts, and the scan blanks out everything
+whose content is not SQL syntax first — string literals, quoted identifiers,
+dollar-quoted bodies, `AS BEGIN_PROC ... END_PROC` bodies and comments. So
+`INSERT INTO t VALUES ('a;COMMIT')` or a procedure body containing `END;`
+cannot be mistaken for a transaction boundary. Netezza neither reports the state
+in `ReadyForQuery` nor errors on a `ROLLBACK` outside a transaction (it returns
+a notice), so a defensive rollback is harmless; the scan is a lexer rather than
+a full SQL parser, and any mistracking errs towards the harmless extra
+`ROLLBACK`. Open transactions through `pool.query()` are not supported at all —
+use `pool.connect()` when you need one.
+
+`release(err)` keeps its meaning: passing an error destroys the connection. The
+only behaviour change is which failures `pool.query()` / `pool.executeNonQuery()`
+consider fatal. A SQL-level failure (`NzDatabaseError`, e.g. an unknown table)
+leaves a healthy session that is returned to the pool, while protocol faults
+(`NzProtocolError`) and socket failures still destroy the connection.
+
 ## ADO.NET-style API
 
 When you need streaming readers, cancellation, or fine-grained command control, use Connection / Command / Reader:

@@ -63,12 +63,15 @@ describe('Handshake protocol framing', () => {
             Buffer.concat([Buffer.from([BackendMessageCode.ErrorResponse]), int32(4 + body.length), body])
         );
 
-        await expect(handshake.connConnectionComplete()).rejects.toBeInstanceOf(NzDatabaseError);
-        await expect(
-            createHandshake(
-                Buffer.concat([Buffer.from([BackendMessageCode.ErrorResponse]), int32(4 + body.length), body])
-            ).handshake.connConnectionComplete()
-        ).rejects.toThrow('handshake failed');
+        try {
+            await handshake.connConnectionComplete();
+        } catch (error) {
+            expect(error).toBeInstanceOf(NzDatabaseError);
+            expect(error.code).toBe('XX000');
+            expect(error.message).toBe('handshake failed');
+            return;
+        }
+        throw new Error('Expected structured handshake ErrorResponse to reject');
     });
 
     test('preserves a legacy NUL-terminated text ErrorResponse during connection completion', async () => {
@@ -79,7 +82,10 @@ describe('Handshake protocol framing', () => {
             ])
         );
 
-        await expect(handshake.connConnectionComplete()).rejects.toThrow(/password authentication failed/i);
+        await expect(handshake.connConnectionComplete()).rejects.toMatchObject({
+            message: expect.stringMatching(/password authentication failed/i),
+            code: undefined,
+        });
     });
 
     // Some Netezza versions frame the legacy text as a zero frame length

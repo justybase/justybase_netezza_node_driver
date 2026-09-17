@@ -6,6 +6,7 @@ import {
     type QueryResult,
     type QueryResultRow,
 } from './NzConnection';
+import { NzDatabaseError } from './errors/NzDatabaseError';
 
 const debug = require('debug')('nz:pool');
 
@@ -30,6 +31,17 @@ export interface NzPoolConfig extends NzConnectionConfig {
     maxLifetimeSeconds?: number;
     /** If true, allow Node.js process to exit even if pool has idle connections (default: false) */
     allowExitOnIdle?: boolean;
+    /**
+     * Roll back an explicit transaction before a checked-out connection returns
+     * to the idle queue (default: true).
+     *
+     * Without this, a caller that runs `BEGIN` and releases without committing
+     * hands the next checkout a session that is still inside an open
+     * transaction, including its uncommitted data. Netezza reports a plain
+     * notice (not an error) for `ROLLBACK` with no transaction in progress, so
+     * the rollback is safe to issue on a connection that only looks dirty.
+     */
+    rollbackOnRelease?: boolean;
 }
 
 interface IdleItem {
@@ -96,6 +108,7 @@ class NzPool extends EventEmitter {
     private readonly _maxUses: number;
     private readonly _maxLifetimeSeconds: number;
     private readonly _allowExitOnIdle: boolean;
+    private readonly _rollbackOnRelease: boolean;
 
     constructor(config: NzPoolConfig) {
         super();
@@ -107,6 +120,7 @@ class NzPool extends EventEmitter {
         this._maxUses = config.maxUses ?? Infinity;
         this._maxLifetimeSeconds = config.maxLifetimeSeconds ?? 0;
         this._allowExitOnIdle = config.allowExitOnIdle ?? false;
+        this._rollbackOnRelease = config.rollbackOnRelease ?? true;
 
         if (!Number.isInteger(this._max) || this._max <= 0) {
             throw new RangeError('Pool max must be a positive integer');
@@ -242,9 +256,27 @@ class NzPool extends EventEmitter {
             release();
             return result;
         } catch (err) {
-            release(err instanceof Error ? err : new Error(String(err)));
+            release(this._releaseErrorFor(err));
             throw err;
         }
+    }
+
+    /**
+     * Decides what `release(err)` receives after a failed checkout use.
+     *
+     * A `NzDatabaseError` is a SQL-level failure: the reader has already
+     * consumed the response up to `ReadyForQuery`, so the session stays usable
+     * and the connection is returned to the idle queue instead of being
+     * destroyed. Everything else removes the client: protocol faults and socket
+     * failures leave the session untrustworthy, and a command timeout
+     * (`Command execution timeout`) still has an abandoned execution draining on
+     * the connection, which would collide with the next checkout. (`NzConnection`
+     * also emits `error`/`close` on a dead socket, which removes it through the
+     * lifecycle listener regardless.)
+     */
+    private _releaseErrorFor(error: unknown): Error | undefined {
+        if (error instanceof NzDatabaseError) return undefined;
+        return error instanceof Error ? error : new Error(String(error));
     }
 
     /**
@@ -263,7 +295,7 @@ class NzPool extends EventEmitter {
             release();
             return { rowsAffected: result.rowCount, notices: result.notices };
         } catch (err) {
-            release(err instanceof Error ? err : new Error(String(err)));
+            release(this._releaseErrorFor(err));
             throw err;
         }
     }
@@ -561,6 +593,43 @@ class NzPool extends EventEmitter {
             return;
         }
 
+        // A connection returned while an explicit transaction is still open
+        // must not leak that transaction (nor its uncommitted data) into the
+        // next checkout, so it goes back to the idle queue only after a
+        // rollback.
+        if (this._rollbackOnRelease && client.inTransaction) {
+            this._rollbackThenIdle(client);
+            return;
+        }
+
+        this._pushIdle(client);
+    }
+
+    /**
+     * Rolls back an open transaction and only then returns the client to the
+     * idle queue. A failed rollback means the session can no longer be
+     * trusted, so the client is removed rather than reused.
+     */
+    private _rollbackThenIdle(client: NzConnection): void {
+        debug('rolling back open transaction before returning client to the pool');
+        void client
+            .rollback()
+            .then(() => {
+                // The pool may have been ended (or the client removed) while
+                // the rollback was in flight; never resurrect it.
+                if (this._removing.has(client) || !this._clients.includes(client)) return;
+                this._pushIdle(client);
+            })
+            .catch((rollbackError: unknown) => {
+                debug('rollback on release failed; removing client', rollbackError);
+                this._remove(client, () => {
+                    this._ensureMinIdle();
+                    this._pulseQueue();
+                });
+            });
+    }
+
+    private _pushIdle(client: NzConnection): void {
         // Set up idle timeout
         let tid: ReturnType<typeof setTimeout> | undefined;
         if (this._idleTimeoutMillis && this._isAboveMin()) {

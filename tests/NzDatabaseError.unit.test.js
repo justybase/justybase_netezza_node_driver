@@ -84,4 +84,18 @@ describe('NzDatabaseError', () => {
         expect(err.code).toBe('28P01');
         expect(err.message).toBe('password authentication failed');
     });
+
+    test('keeps the structured code available on the thrown Error object', () => {
+        const err = createNzDatabaseError(
+            encodeFields([
+                ['S', 'ERROR'],
+                ['C', '42P01'],
+                ['M', 'relation does not exist'],
+            ])
+        );
+
+        expect(err).toBeInstanceOf(Error);
+        expect(err.code).toBe('42P01');
+        expect(err.message).toBe('relation does not exist');
+    });
 });

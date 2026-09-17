@@ -1,7 +1,7 @@
 import type { NzCommand } from './NzCommand';
 import type { QueryResultRow } from './NzConnection';
 import type { TimeValue } from './types/TypeConversions';
-import { NzDatabaseError } from './errors/NzDatabaseError';
+import type { NzDatabaseError } from './errors/NzDatabaseError';
 
 /**
  * Column description from the database
@@ -515,9 +515,7 @@ class NzDataReader<TRow = QueryResultRow> {
             }
 
             if (val.type === 'ErrorResponse') {
-                throw val.error instanceof NzDatabaseError
-                    ? val.error
-                    : new NzDatabaseError({ message: val.message || 'Unknown Netezza Error', raw: val.message || '' });
+                throw val.error;
             }
 
             if (val.type === 'ReadyForQuery') {
@@ -634,9 +632,7 @@ class NzDataReader<TRow = QueryResultRow> {
             }
 
             if (val.type === 'ErrorResponse') {
-                throw val.error instanceof NzDatabaseError
-                    ? val.error
-                    : new NzDatabaseError({ message: val.message || 'Unknown Netezza Error', raw: val.message || '' });
+                throw val.error;
             }
 
             if (val.type === 'ReadyForQuery') {
