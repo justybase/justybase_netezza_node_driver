@@ -16,12 +16,10 @@ a safe IPC bridge (`window.nz.*`).
 ## Quick start
 
 ```bash
-# from the repository root
-npm ci && npm run build    # build the workspace-linked driver
 cd examples/sql-editor-electron
 npm ci
-cp .env.example .env      # optional: NZ_HOST, NZ_PORT, NZ_DATABASE, NZ_USER, NZ_PASSWORD
-npm run dev               # Electron window + HMR
+cp .env.example .env   # optional: NZ_HOST, NZ_PORT, NZ_DATABASE, NZ_USER, NZ_PASSWORD
+npm run dev            # Electron window + HMR
 ```
 
 Production build:
