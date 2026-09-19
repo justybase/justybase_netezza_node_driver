@@ -12,7 +12,7 @@ import {
   type OperationContext,
   type OperationProgress
 } from './operations';
-import type { NzImportPreview, NzImportPreviewResult, NzImportRequest, NzImportResult } from '../preload/api';
+import type { NzErrorPayload, NzImportPreview, NzImportPreviewResult, NzImportRequest, NzImportResult } from '../preload/api';
 
 export interface ConnectParams {
   host: string;
@@ -77,13 +77,35 @@ export interface QueryErr {
   canceled?: boolean;
   message: string;
   code?: string;
+  severity?: string;
   detail?: string;
+  hint?: string;
+  diagnostics?: Record<string, string>;
   elapsedMs: number;
   sourceSql: string;
   executedSql: string;
 }
 
 export type QueryResultPayload = QueryOk | QueryErr;
+
+/** Convert driver errors into an explicit, IPC-safe diagnostic payload. */
+export function toNzErrorPayload(error: unknown): NzErrorPayload {
+  if (error instanceof NzDatabaseError) {
+    // Keep the editor compatible with an already-installed older driver while
+    // the package is upgraded. Newer drivers always expose diagnostics.
+    const diagnostics = (error as NzDatabaseError & { diagnostics?: Readonly<Record<string, string>> }).diagnostics;
+    return {
+      message: error.message,
+      code: error.code,
+      severity: error.severity,
+      detail: error.detail,
+      hint: error.hint,
+      diagnostics: diagnostics ? { ...diagnostics } : undefined
+    };
+  }
+
+  return { message: error instanceof Error ? error.message : String(error) };
+}
 
 let conn: NzConnection | null = null;
 let connectedInfo: { host: string; database: string; user: string; port: number } | null = null;
@@ -374,9 +396,9 @@ export async function runQuery(rawSql: string, opts: QueryOptions = {}): Promise
       return canceledQuery(sourceSql, sql, started);
     }
     if (err instanceof NzDatabaseError) {
-      return { ok: false, message: err.message, code: err.code, detail: err.detail, elapsedMs, sourceSql, executedSql: sql };
+      return { ok: false, ...toNzErrorPayload(err), elapsedMs, sourceSql, executedSql: sql };
     }
-    return { ok: false, message: err instanceof Error ? err.message : String(err), elapsedMs, sourceSql, executedSql: sql };
+    return { ok: false, ...toNzErrorPayload(err), elapsedMs, sourceSql, executedSql: sql };
   } finally {
     c.commandTimeout = prevTimeout;
     finishOperation(operation.id);

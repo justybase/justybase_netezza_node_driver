@@ -1,3 +1,13 @@
+export interface NzErrorPayload {
+  message: string;
+  /** SQLSTATE when the backend supplied field C. */
+  code?: string;
+  severity?: string;
+  detail?: string;
+  hint?: string;
+  diagnostics?: Record<string, string>;
+}
+
 export interface NzField {
   name: string;
   dataTypeID: number;
@@ -43,7 +53,10 @@ export interface NzQueryErr {
   canceled?: boolean;
   message: string;
   code?: string;
+  severity?: string;
   detail?: string;
+  hint?: string;
+  diagnostics?: Record<string, string>;
   elapsedMs: number;
   sourceSql: string;
   executedSql: string;
@@ -110,6 +123,11 @@ export interface NzImportResult {
   ok: boolean;
   canceled?: boolean;
   message: string;
+  code?: string;
+  severity?: string;
+  detail?: string;
+  hint?: string;
+  diagnostics?: Record<string, string>;
   rowsProcessed?: number;
   rowsInserted?: number;
   columns?: number;
@@ -124,7 +142,12 @@ export interface NzImportPreviewCanceled {
   message: string;
 }
 
-export type NzImportPreviewResult = NzImportPreview | NzImportPreviewCanceled;
+export interface NzImportPreviewError extends NzErrorPayload {
+  ok: false;
+  canceled?: false;
+}
+
+export type NzImportPreviewResult = NzImportPreview | NzImportPreviewCanceled | NzImportPreviewError;
 
 export interface NzSqlFile {
   ok: true;
@@ -142,6 +165,11 @@ export interface NzFileError {
   ok: false;
   canceled?: false;
   message: string;
+  code?: string;
+  severity?: string;
+  detail?: string;
+  hint?: string;
+  diagnostics?: Record<string, string>;
 }
 
 export type NzOpenSqlResult = NzSqlFile | NzFileCanceled | NzFileError;
@@ -176,7 +204,18 @@ export interface NzSchemaNode {
 export type NzObjectDefinitionKind = 'VIEW' | 'PROCEDURE';
 export type NzObjectDefinitionResult =
   | { ok: true; content: string }
-  | { ok: false; message: string };
+  | ({ ok: false } & NzErrorPayload);
+
+export interface NzConnectInfo {
+  host: string;
+  database: string;
+  user: string;
+  port: number;
+}
+
+export type NzConnectResult =
+  | { ok: true; info: NzConnectInfo }
+  | { ok: false; error: NzErrorPayload };
 
 export interface NzApi {
   connect: (params: {
@@ -187,7 +226,7 @@ export interface NzApi {
     password: string;
     uri?: string;
     commandTimeoutSec?: number;
-  }) => Promise<{ ok: boolean; info: { host: string; database: string; user: string; port: number } }>;
+  }) => Promise<NzConnectResult>;
   disconnect: () => Promise<{ ok: boolean }>;
   status: () => Promise<{ connected: boolean; info: { host: string; database: string; user: string; port: number } | null }>;
   query: (payload: { operationId: string; sql: string; maxRows?: number; timeoutSec?: number; applyAutoLimit?: boolean }) => Promise<NzQueryOk | NzQueryErr>;
@@ -195,10 +234,10 @@ export interface NzApi {
   schema: () => Promise<{ schemas: NzSchemaNode[]; warning?: string }>;
   columns: (payload: { database?: string; schema?: string; table: string }) => Promise<NzColumn[]>;
   objectDefinition: (payload: { database?: string; schema: string; name: string; kind: NzObjectDefinitionKind }) => Promise<NzObjectDefinitionResult>;
-  exportCsv: (payload: { operationId: string; rows: Record<string, unknown>[]; fields: NzField[]; defaultName?: string }) => Promise<{ ok: boolean; filePath?: string; canceled?: boolean; message?: string }>;
+  exportCsv: (payload: { operationId: string; rows: Record<string, unknown>[]; fields: NzField[]; defaultName?: string }) => Promise<{ ok: boolean; filePath?: string; canceled?: boolean } & Partial<NzErrorPayload>>;
   exportExcel: (payload: { operationId: string; sql: string; resultSetIndex?: number; format: 'xlsx' | 'xlsb'; timeoutSec?: number; defaultName?: string }) => Promise<
     | { ok: true; filePath: string; rowsExported: number; columns: number }
-    | { ok: false; canceled?: boolean; message?: string }
+    | ({ ok: false; canceled?: boolean } & Partial<NzErrorPayload>)
   >;
   openSqlFile: () => Promise<NzOpenSqlResult>;
   saveSqlFile: (payload: { sql: string; filePath?: string; defaultName?: string; saveAs?: boolean }) => Promise<NzSaveSqlResult>;

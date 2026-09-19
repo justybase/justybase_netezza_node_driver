@@ -1,4 +1,6 @@
 import { useEffect, useState } from 'react';
+import ErrorDetails from './ErrorDetails';
+import type { NzErrorPayload } from '../../../preload/api';
 
 interface Profile {
   name: string;
@@ -12,7 +14,7 @@ interface Props {
   open: boolean;
   initial: { host: string; port: number; database: string; user: string };
   busy: boolean;
-  error: string | null;
+  error: NzErrorPayload | null;
   onClose: () => void;
   onSubmit: (p: { host: string; port: number; database: string; user: string; password: string; uri?: string }) => void;
 }
@@ -162,7 +164,7 @@ export default function ConnectionDialog({ open, initial, busy, error, onClose, 
           )}
 
           {error && (
-            <div className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-300">{error}</div>
+            <div className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-300"><ErrorDetails error={error} /></div>
           )}
         </div>
 

@@ -7,9 +7,10 @@ interface Props {
   autoLimitApplied: boolean;
   noticesCount: number;
   errorCode?: string;
+  errorSeverity?: string;
 }
 
-export default function StatusBar({ elapsedMs, rowCount, truncated, autoLimitApplied, noticesCount, errorCode }: Props) {
+export default function StatusBar({ elapsedMs, rowCount, truncated, autoLimitApplied, noticesCount, errorCode, errorSeverity }: Props) {
   return (
     <footer className="flex h-7 shrink-0 items-center gap-4 border-t border-slate-800 bg-slate-900/80 px-3 text-[11px] text-slate-500">
       <span className="flex items-center gap-1.5">
@@ -21,6 +22,7 @@ export default function StatusBar({ elapsedMs, rowCount, truncated, autoLimitApp
       {autoLimitApplied && <span className="rounded bg-indigo-500/15 px-1.5 py-0.5 text-indigo-300">preview limited · Excel = full SQL</span>}
       {noticesCount > 0 && <span className="text-sky-300">notices: {noticesCount}</span>}
       {errorCode && <span className="rounded bg-red-500/15 px-1.5 py-0.5 font-mono text-red-300">{errorCode}</span>}
+      {errorSeverity && <span className="rounded bg-orange-500/15 px-1.5 py-0.5 text-orange-300">{errorSeverity}</span>}
       <span className="ml-auto hidden font-mono text-slate-600 sm:inline">driver: @justybase/netezza-driver · main-process only</span>
     </footer>
   );

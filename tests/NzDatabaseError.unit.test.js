@@ -35,12 +35,43 @@ describe('parseBackendErrorFields', () => {
         expect(parsed.message).toBe('relation "foo" does not exist');
         expect(parsed.detail).toBe('extra detail');
         expect(parsed.hint).toBe('check the name');
+        expect(parsed.diagnostics).toMatchObject({ S: 'ERROR', C: '42P01', M: 'relation "foo" does not exist', D: 'extra detail', H: 'check the name' });
         expect(parsed.raw).toContain('relation "foo" does not exist');
+    });
+
+    test('keeps all backend fields and prefers non-localized severity', () => {
+        const parsed = parseBackendErrorFields(encodeFields([
+            ['S', 'BŁĄD'],
+            ['V', 'ERROR'],
+            ['C', 'XX000'],
+            ['M', 'failure'],
+            ['P', '12'],
+            ['R', 'routine'],
+            ['W', 'where'],
+            ['F', 'file.c'],
+            ['L', '42'],
+            ['X', 'future-field'],
+        ]));
+
+        expect(parsed.severity).toBe('ERROR');
+        expect(parsed.diagnostics).toEqual({
+            S: 'BŁĄD',
+            V: 'ERROR',
+            C: 'XX000',
+            M: 'failure',
+            P: '12',
+            R: 'routine',
+            W: 'where',
+            F: 'file.c',
+            L: '42',
+            X: 'future-field',
+        });
     });
 
     test('falls back to raw text when no M field', () => {
         const parsed = parseBackendErrorFields(Buffer.from('plain error text\0', 'utf8'));
-        expect(parsed.message).toMatch(/plain error text|Unknown Netezza error/);
+        expect(parsed.message).toBe('plain error text');
+        expect(parsed.diagnostics).toEqual({});
     });
 
     test('accepts string payloads', () => {
@@ -97,5 +128,25 @@ describe('NzDatabaseError', () => {
         expect(err).toBeInstanceOf(Error);
         expect(err.code).toBe('42P01');
         expect(err.message).toBe('relation does not exist');
+    });
+
+    test('uses a stable message for an explicitly empty backend response', () => {
+        const err = createNzDatabaseError(Buffer.from([0]));
+
+        expect(err.message).toBe('Netezza backend returned an empty error response');
+        expect(err.dbMessage).toBe(err.message);
+        expect(err.code).toBeUndefined();
+        expect(err.diagnostics).toEqual({});
+    });
+
+    test('copies diagnostics into an immutable error payload', () => {
+        const err = new NzDatabaseError({
+            message: 'failure',
+            raw: 'raw',
+            diagnostics: { C: 'XX000' },
+        });
+
+        expect(err.diagnostics).toEqual({ C: 'XX000' });
+        expect(Object.isFrozen(err.diagnostics)).toBe(true);
     });
 });

@@ -6,14 +6,10 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { PGUtil } from './utils/PGUtil';
 import { BackendMessageCode, HandshakeCode, ProtocolVersion } from './protocol/constants';
-import { createNzDatabaseError, NzDatabaseError } from './errors/NzDatabaseError';
+import { createNzDatabaseError } from './errors/NzDatabaseError';
 import { SocketTransport } from './transport/SocketTransport';
 import { normalizeClientType } from './clientTypes';
-import {
-    NzProtocolError,
-    validateProtocolLength,
-    validateProtocolLengthAfterOverhead,
-} from './protocol/ProtocolLength';
+import { validateProtocolLength, validateProtocolLengthAfterOverhead } from './protocol/ProtocolLength';
 import createDebug from 'debug';
 
 const debug = createDebug('nz:handshake');
@@ -24,10 +20,7 @@ const debug = createDebug('nz:handshake');
  */
 const MAX_LEGACY_ERROR_TEXT_BYTES = 4096;
 
-/**
- * A legacy error text is a message, not a stray byte. Shorter payloads are
- * treated as malformed framing (see `_readLegacyConnectionErrorText`).
- */
+/** Minimum characters needed to distinguish a zero-length legacy text frame from a message type byte. */
 const MIN_LEGACY_ERROR_TEXT_CHARS = 4;
 
 /**
@@ -132,6 +125,23 @@ class Handshake {
         return buf[0];
     }
 
+    /**
+     * Reads an ErrorResponse after its type byte has already been consumed.
+     * Netezza servers use both normal length-prefixed frames and legacy
+     * NUL-terminated text (including a zero-length, NUL-only response).
+     * Transport and framing errors intentionally escape unchanged.
+     */
+    private async _throwHandshakeErrorResponse(stage: string): Promise<never> {
+        const lenBuf = await this.readBytes(4);
+        const len = PGUtil.readInt32(lenBuf);
+        const legacyText = await this._readLegacyConnectionErrorText(lenBuf, len);
+        if (legacyText !== null) throw createNzDatabaseError(legacyText);
+
+        const bodyLength = validateProtocolLengthAfterOverhead(len, 4, `${stage}FrameLength`, `${stage}Payload`);
+        const body = await this.readBytes(bodyLength);
+        throw createNzDatabaseError(body);
+    }
+
     async connHandshakeNegotiate(): Promise<boolean> {
         let version: number = ProtocolVersion.CP_VERSION_6;
         while (true) {
@@ -155,6 +165,8 @@ class Handshake {
                 else if (verChar === '3') version = ProtocolVersion.CP_VERSION_3;
                 else if (verChar === '4') version = ProtocolVersion.CP_VERSION_4;
                 else if (verChar === '5') version = ProtocolVersion.CP_VERSION_5;
+            } else if (beresp === BackendMessageCode.ErrorResponse) {
+                return this._throwHandshakeErrorResponse('handshakeNegotiationError');
             } else {
                 return false;
             }
@@ -164,7 +176,7 @@ class Handshake {
     async connSendHandshakeInfo(database: string, user: string): Promise<boolean> {
         if (!(await this.connSendDatabase(database))) return false;
 
-        await this.connSecureSession();
+        if (!(await this.connSecureSession())) return false;
 
         this.connSetNextDataProtocol(this._protocol1, this._protocol2);
 
@@ -185,6 +197,9 @@ class Handshake {
 
         const beresp = await this.readByte();
         if (beresp === 'N'.charCodeAt(0)) return true;
+        if (beresp === BackendMessageCode.ErrorResponse) {
+            return this._throwHandshakeErrorResponse('databaseSelectionError');
+        }
         return false;
     }
 
@@ -254,6 +269,8 @@ class Handshake {
                         .then((beresp) => {
                             if (beresp === 'N'.charCodeAt(0)) {
                                 resolve(true);
+                            } else if (beresp === BackendMessageCode.ErrorResponse) {
+                                this._throwHandshakeErrorResponse('sslHandshakeError').catch(reject);
                             } else {
                                 reject(
                                     new Error(
@@ -272,6 +289,10 @@ class Handshake {
                     reject(err);
                 });
             });
+        }
+
+        if (beresp === BackendMessageCode.ErrorResponse) {
+            return this._throwHandshakeErrorResponse('secureSessionError');
         }
 
         return false;
@@ -295,6 +316,9 @@ class Handshake {
 
         while (information !== 0) {
             const beresp = await this.readByte();
+            if (beresp === BackendMessageCode.ErrorResponse) {
+                return this._throwHandshakeErrorResponse('handshakeError');
+            }
             if (beresp !== 'N'.charCodeAt(0)) return false;
 
             switch (information) {
@@ -414,24 +438,7 @@ class Handshake {
                         return true;
                 }
             } else if (beresp === BackendMessageCode.ErrorResponse) {
-                try {
-                    const lenBuf = await this.readBytes(4);
-                    const len = PGUtil.readInt32(lenBuf);
-                    const bodyLength = validateProtocolLengthAfterOverhead(
-                        len,
-                        4,
-                        'handshakeErrorFrameLength',
-                        'handshakeErrorPayload'
-                    );
-                    const body = await this.readBytes(bodyLength);
-                    throw createNzDatabaseError(body);
-                } catch (e) {
-                    if (e instanceof NzDatabaseError || e instanceof NzProtocolError) throw e;
-                    throw new NzDatabaseError({
-                        message: 'Handshake V2 Failed: ErrorResponse from backend',
-                        raw: 'Handshake V2 Failed: ErrorResponse from backend',
-                    });
-                }
+                return this._throwHandshakeErrorResponse('handshakeError');
             } else {
                 throw new Error(`Handshake V2 Failed: Unexpected response ${String.fromCharCode(beresp)}`);
             }
@@ -450,6 +457,9 @@ class Handshake {
 
     async connAuthenticate(password: string): Promise<boolean> {
         const beresp = await this.readByte();
+        if (beresp === BackendMessageCode.ErrorResponse) {
+            return this._throwHandshakeErrorResponse('authenticationError');
+        }
         if (beresp !== BackendMessageCode.AuthenticationRequest) return false;
 
         const areq = PGUtil.readInt32(await this.readBytes(4));
@@ -518,9 +528,11 @@ class Handshake {
      */
     private async _readLegacyErrorText(
         minChars: number,
-        isAllowedByte: (byte: number) => boolean
+        isAllowedByte: (byte: number) => boolean,
+        initialBytes: number[] = []
     ): Promise<string | null> {
-        const chars: number[] = [];
+        const chars: number[] = [...initialBytes];
+        if (chars.length > MAX_LEGACY_ERROR_TEXT_BYTES) return null;
         while (true) {
             let byte: number;
             try {
@@ -565,13 +577,22 @@ class Handshake {
 
         if (len !== 0) return null;
 
-        // The zero length framing is ambiguous, so require a full message: a
-        // single printable byte is usually the type byte of the next message
-        // (e.g. 'Z' of ReadyForQuery) when the frame was malformed. This does
-        // consume bytes before the length validation runs, which is safe
-        // because a null result always ends in a protocol error that tears the
-        // connection down.
-        return this._readLegacyErrorText(MIN_LEGACY_ERROR_TEXT_CHARS, isPrintableAscii);
+        // The zero length framing is ambiguous. Accept an explicitly empty
+        // NUL-terminated response as a database error, while requiring a real
+        // text message to have at least the same four characters that make the
+        // length-less form recognisable. This prevents a following binary
+        // message such as ReadyForQuery (`Z` + length) from being consumed as
+        // an error string.
+        let first: number;
+        try {
+            first = await this.readByte();
+        } catch (e) {
+            debug('Empty-frame legacy error text could not be read', e);
+            return null;
+        }
+        if (first === 0) return '';
+        if (!isLegacyErrorTextByte(first)) return null;
+        return this._readLegacyErrorText(MIN_LEGACY_ERROR_TEXT_CHARS, isLegacyErrorTextByte, [first]);
     }
 
     async connConnectionComplete(): Promise<boolean> {
@@ -585,20 +606,7 @@ class Handshake {
                 continue;
             }
             if (beresp === BackendMessageCode.ErrorResponse) {
-                const lenBuf = await this.readBytes(4);
-                const len = PGUtil.readInt32(lenBuf);
-
-                const legacyText = await this._readLegacyConnectionErrorText(lenBuf, len);
-                if (legacyText !== null) throw createNzDatabaseError(legacyText);
-
-                const bodyLength = validateProtocolLengthAfterOverhead(
-                    len,
-                    4,
-                    'connectionCompleteErrorFrameLength',
-                    'connectionCompleteErrorPayload'
-                );
-                const body = await this.readBytes(bodyLength);
-                throw createNzDatabaseError(body);
+                return this._throwHandshakeErrorResponse('connectionCompleteError');
             }
 
             const skipped = await this.readBytes(4);

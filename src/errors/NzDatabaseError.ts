@@ -13,6 +13,8 @@ export class NzDatabaseError extends Error {
     readonly detail: string | undefined;
     /** Optional hint */
     readonly hint: string | undefined;
+    /** All backend diagnostic fields keyed by their protocol field code. */
+    readonly diagnostics: Readonly<Record<string, string>>;
     /** Raw payload as received from the backend */
     readonly raw: string;
 
@@ -22,15 +24,18 @@ export class NzDatabaseError extends Error {
         message: string;
         detail?: string;
         hint?: string;
+        diagnostics?: Readonly<Record<string, string>>;
         raw: string;
     }) {
-        super(fields.message || fields.raw || 'Netezza error');
+        const message = fields.message || fields.raw || 'Netezza backend returned an empty error response';
+        super(message);
         this.name = 'NzDatabaseError';
         this.severity = fields.severity;
         this.code = fields.code;
-        this.dbMessage = fields.message;
+        this.dbMessage = message;
         this.detail = fields.detail;
         this.hint = fields.hint;
+        this.diagnostics = Object.freeze({ ...(fields.diagnostics ?? {}) });
         this.raw = fields.raw;
         Object.setPrototypeOf(this, new.target.prototype);
     }
@@ -46,55 +51,79 @@ export function parseBackendErrorFields(data: Buffer | string): {
     message: string;
     detail?: string;
     hint?: string;
+    diagnostics: Readonly<Record<string, string>>;
     raw: string;
 } {
     const buf = typeof data === 'string' ? Buffer.from(data, 'utf8') : data;
     const raw = buf.toString('utf8').replace(/\0+$/g, '');
 
-    let severity: string | undefined;
+    let nonLocalizedSeverity: string | undefined;
+    let localizedSeverity: string | undefined;
     let code: string | undefined;
     let message = '';
     let detail: string | undefined;
     let hint: string | undefined;
+    const diagnostics: Record<string, string> = {};
 
-    let i = 0;
-    while (i < buf.length) {
-        const type = buf[i++];
-        if (type === 0) break;
+    // A structured body has a NUL after each field and one final terminator,
+    // while legacy text has at most the single terminator at its end. This
+    // prevents text such as "ERROR: ..." or "Password ..." from becoming
+    // synthetic diagnostic fields (E/P) while retaining unknown fields in a
+    // real structured response.
+    let nulCount = 0;
+    for (const byte of buf) {
+        if (byte === 0) nulCount++;
+    }
 
-        let end = i;
-        while (end < buf.length && buf[end] !== 0) end++;
-        const value = buf.subarray(i, end).toString('utf8');
-        i = end < buf.length ? end + 1 : end;
+    if (nulCount >= 2) {
+        let i = 0;
+        while (i < buf.length) {
+            const type = buf[i++];
+            if (type === 0) break;
 
-        switch (String.fromCharCode(type)) {
-            case 'S':
-            case 'V':
-                severity = value;
-                break;
-            case 'C':
-                code = value;
-                break;
-            case 'M':
-                message = value;
-                break;
-            case 'D':
-                detail = value;
-                break;
-            case 'H':
-                hint = value;
-                break;
-            default:
-                break;
+            let end = i;
+            while (end < buf.length && buf[end] !== 0) end++;
+            const value = buf.subarray(i, end).toString('utf8');
+            i = end < buf.length ? end + 1 : end;
+
+            const field = String.fromCharCode(type);
+            diagnostics[field] = value;
+
+            switch (field) {
+                case 'S':
+                    localizedSeverity = value;
+                    break;
+                case 'V':
+                    nonLocalizedSeverity = value;
+                    break;
+                case 'C':
+                    code = value;
+                    break;
+                case 'M':
+                    message = value;
+                    break;
+                case 'D':
+                    detail = value;
+                    break;
+                case 'H':
+                    hint = value;
+                    break;
+                default:
+                    break;
+            }
         }
     }
 
+    // V is the non-localized severity and is the most stable value for
+    // applications. Keep S and V separately in diagnostics in either case.
+    const severity = nonLocalizedSeverity ?? localizedSeverity;
+
     if (!message) {
         // Fallback: treat entire payload as message (legacy / non-field payloads)
-        message = raw.replace(/\0/g, '').trim() || 'Unknown Netezza error';
+        message = raw.replace(/\0/g, '').trim() || 'Netezza backend returned an empty error response';
     }
 
-    return { severity, code, message, detail, hint, raw };
+    return { severity, code, message, detail, hint, diagnostics: Object.freeze(diagnostics), raw };
 }
 
 export function createNzDatabaseError(data: Buffer | string): NzDatabaseError {

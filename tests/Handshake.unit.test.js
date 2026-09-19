@@ -104,6 +104,18 @@ describe('Handshake protocol framing', () => {
         ).rejects.toThrow(/FATAL 1: access denied/);
     });
 
+    test('preserves an explicitly empty zero-length ErrorResponse as a database error', async () => {
+        const { handshake } = createHandshake(
+            Buffer.concat([Buffer.from([BackendMessageCode.ErrorResponse]), Buffer.alloc(4), Buffer.from([0])])
+        );
+
+        await expect(handshake.connConnectionComplete()).rejects.toMatchObject({
+            name: 'NzDatabaseError',
+            message: 'Netezza backend returned an empty error response',
+            code: undefined,
+        });
+    });
+
     test('rejects an empty ErrorResponse frame without a legacy text payload', async () => {
         const { handshake } = createHandshake(
             Buffer.concat([Buffer.from([BackendMessageCode.ErrorResponse]), Buffer.alloc(4), Buffer.from([0x01])])
@@ -152,6 +164,58 @@ describe('Handshake protocol framing', () => {
         const { handshake } = createHandshake(Buffer.concat([Buffer.from('N'), Buffer.from([BackendMessageCode.ErrorResponse]), int32(-1)]));
 
         await expect(handshake.connSendHandshakeVersion2(6, 'user')).rejects.toThrow(/handshakeErrorFrameLength/);
+    });
+
+    test('preserves structured ErrorResponse fields in v2 handshake', async () => {
+        const body = Buffer.from('SERROR\0C28000\0Mhandshake denied\0Ddatabase unavailable\0\0');
+        const { handshake } = createHandshake(
+            Buffer.concat([Buffer.from('N'), Buffer.from([BackendMessageCode.ErrorResponse]), int32(4 + body.length), body])
+        );
+
+        await expect(handshake.connSendHandshakeVersion2(6, 'user')).rejects.toMatchObject({
+            name: 'NzDatabaseError',
+            code: '28000',
+            detail: 'database unavailable',
+        });
+    });
+
+    test('preserves structured ErrorResponse fields in v4 handshake', async () => {
+        const body = Buffer.from('SERROR\0CXX000\0Mv4 handshake denied\0\0');
+        const { handshake } = createHandshake(
+            Buffer.concat([Buffer.from([BackendMessageCode.ErrorResponse]), int32(4 + body.length), body])
+        );
+
+        await expect(handshake.connSendHandshakeVersion4(6, 'user')).rejects.toMatchObject({
+            name: 'NzDatabaseError',
+            code: 'XX000',
+            message: 'v4 handshake denied',
+        });
+    });
+
+    test('preserves structured ErrorResponse fields during database selection', async () => {
+        const body = Buffer.from('SERROR\0C3D000\0Mdatabase does not exist\0\0');
+        const { handshake } = createHandshake(
+            Buffer.concat([Buffer.from([BackendMessageCode.ErrorResponse]), int32(4 + body.length), body])
+        );
+
+        await expect(handshake.connSendDatabase('missing')).rejects.toMatchObject({
+            name: 'NzDatabaseError',
+            code: '3D000',
+            message: 'database does not exist',
+        });
+    });
+
+    test('preserves structured ErrorResponse fields during authentication', async () => {
+        const body = Buffer.from('SFATAL\0VFATAL\0C28P01\0Mpassword authentication failed\0\0');
+        const { handshake } = createHandshake(
+            Buffer.concat([Buffer.from([BackendMessageCode.ErrorResponse]), int32(4 + body.length), body])
+        );
+
+        await expect(handshake.connAuthenticate('secret')).rejects.toMatchObject({
+            name: 'NzDatabaseError',
+            code: '28P01',
+            message: 'password authentication failed',
+        });
     });
 
     test('accepts the normal ReadyForQuery connection-complete marker', async () => {
