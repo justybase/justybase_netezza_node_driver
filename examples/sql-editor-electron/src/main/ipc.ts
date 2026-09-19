@@ -1,7 +1,7 @@
 import { ipcMain, dialog, BrowserWindow } from 'electron';
 import { readFile, writeFile } from 'node:fs/promises';
 import { basename } from 'node:path';
-import { connect, disconnect, status, runQuery, cancel, getSchemaTree, getColumns, getObjectDefinition, exportRowsToCsv, getCompletionItems, exportQueryToExcel, previewImportFile, importFile } from './db';
+import { connect, disconnect, status, runQuery, cancel, getSchemaTree, getColumns, getObjectDefinition, exportRowsToCsv, getCompletionItems, exportQueryToExcel, previewImportFile, importFile, toNzErrorPayload } from './db';
 
 let registered = false;
 
@@ -26,8 +26,12 @@ export function registerIpc(): void {
   registered = true;
 
   ipcMain.handle('db:connect', async (_e, params) => {
-    const info = await connect(params);
-    return { ok: true, info };
+    try {
+      const info = await connect(params);
+      return { ok: true, info };
+    } catch (error) {
+      return { ok: false, error: toNzErrorPayload(error) };
+    }
   });
 
   ipcMain.handle('db:disconnect', async () => {
@@ -85,7 +89,7 @@ export function registerIpc(): void {
       if ('canceled' in exported) return { ok: false, canceled: true };
       return { ok: true, filePath: outputPath, rowsExported: exported.rowsExported };
     } catch (err) {
-      return { ok: false, message: err instanceof Error ? err.message : String(err) };
+      return { ok: false, ...toNzErrorPayload(err) };
     }
   });
 
@@ -108,7 +112,7 @@ export function registerIpc(): void {
       if ('canceled' in exported) return { ok: false, canceled: true };
       return { ok: true, filePath: outputPath, ...exported };
     } catch (err) {
-      return { ok: false, message: err instanceof Error ? err.message : String(err) };
+      return { ok: false, ...toNzErrorPayload(err) };
     }
   });
 
@@ -164,16 +168,24 @@ export function registerIpc(): void {
   });
 
   ipcMain.handle('db:preview-import', async (event, payload: { operationId: string; filePath: string; sheetName?: string; hasHeader?: boolean; delimiter?: string }) => {
-    if (!payload?.filePath) throw new Error('Import file path is required.');
-    return previewImportFile(payload, sendProgress(event));
+    if (!payload?.filePath) return { ok: false, ...toNzErrorPayload(new Error('Import file path is required.')) };
+    try {
+      return await previewImportFile(payload, sendProgress(event));
+    } catch (error) {
+      return { ok: false, ...toNzErrorPayload(error) };
+    }
   });
 
   ipcMain.handle('db:import-file', async (event, payload) => {
     if (!payload?.filePath || !payload?.targetTable) {
       return { ok: false, message: 'Import file and target table are required.' };
     }
-    return importFile(payload, (progress) => {
-      event.sender.send('db:operation-progress', progress);
-    });
+    try {
+      return await importFile(payload, (progress) => {
+        event.sender.send('db:operation-progress', progress);
+      });
+    } catch (error) {
+      return { ok: false, ...toNzErrorPayload(error), format: payload.format };
+    }
   });
 }

@@ -19,7 +19,7 @@
     "dist:mac": "npm run build && electron-builder --mac --publish never"
   },
   "dependencies": {
-    "@justybase/netezza-driver": "^3.1.0",
+    "@justybase/netezza-driver": "^3.2.2",
     "@justybase/spreadsheet-tasks": "^2.1.1",
     "@tanstack/react-table": "^8.21.3",
     "monaco-editor": "^0.52.2",

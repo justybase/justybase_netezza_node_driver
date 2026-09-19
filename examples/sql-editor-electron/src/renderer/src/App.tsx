@@ -6,9 +6,10 @@ import SchemaBrowser from './components/SchemaBrowser';
 import SqlEditor from './components/SqlEditor';
 import ResultsTable from './components/ResultsTable';
 import StatusBar from './components/StatusBar';
+import ErrorDetails from './components/ErrorDetails';
 import { loadHistory, pushHistory, clearHistory, type HistoryEntry } from './lib/history';
 import { SAMPLE_SQL, formatMs } from './lib/format';
-import type { NzColumn, NzImportResult, NzOperationKind, NzOperationProgress, NzQueryErr, NzQueryOk, NzResultSet, NzSchemaNode } from '../../preload/api';
+import type { NzColumn, NzErrorPayload, NzImportResult, NzOperationKind, NzOperationProgress, NzQueryErr, NzQueryOk, NzResultSet, NzSchemaNode } from '../../preload/api';
 
 type PaneTab = 'results' | 'messages' | 'history';
 type ExportFormat = 'xlsx' | 'xlsb';
@@ -92,7 +93,7 @@ export default function App() {
   const [connInfo, setConnInfo] = useState<{ host: string; database: string; user: string; port: number } | null>(null);
   const [showConnect, setShowConnect] = useState(false);
   const [connectBusy, setConnectBusy] = useState(false);
-  const [connectError, setConnectError] = useState<string | null>(null);
+  const [connectError, setConnectError] = useState<NzErrorPayload | null>(null);
   const [sqlTabs, setSqlTabs] = useState<SqlTabState[]>(() => [createSqlTab('Query 1', SAMPLE_SQL)]);
   const [activeSqlTabId, setActiveSqlTabId] = useState('');
   const [runningTabId, setRunningTabId] = useState<string | null>(null);
@@ -191,19 +192,23 @@ export default function App() {
 
   const doConnect = async (params: { host: string; port: number; database: string; user: string; password: string; uri?: string }) => {
     if (!hasBridge()) {
-      setConnectError('Electron bridge (window.nz) is missing. Run via `npm run dev`, not plain Vite.');
+      setConnectError({ message: 'Electron bridge (window.nz) is missing. Run via `npm run dev`, not plain Vite.' });
       return;
     }
     setConnectBusy(true);
     setConnectError(null);
     try {
       const response = await window.nz.connect({ ...params, commandTimeoutSec: activeSqlTab?.settings.timeoutSec ?? 30 });
+      if (!response.ok) {
+        setConnectError(response.error);
+        return;
+      }
       setConnected(true);
       setConnInfo(response.info);
       setShowConnect(false);
       void refreshSchema();
     } catch (cause) {
-      setConnectError(cause instanceof Error ? cause.message : String(cause));
+      setConnectError({ message: cause instanceof Error ? cause.message : String(cause) });
     } finally {
       setConnectBusy(false);
     }
@@ -502,7 +507,7 @@ export default function App() {
                 )
               )}
 
-              {activeSqlTab?.pane === 'messages' && <div className="h-full overflow-y-auto p-3">{activeSqlTab.executions.length === 0 ? <div className="p-4 text-center text-xs text-slate-600">No messages — run a query.</div> : <div className="space-y-2">{[...activeSqlTab.executions].reverse().map((execution) => { const canceled = !execution.response.ok && execution.response.canceled; return <div key={execution.id} className="rounded-lg border border-slate-800 bg-slate-900/60 p-3"><div className="flex items-center gap-2 text-[11px]"><span className={`rounded px-1.5 py-0.5 font-semibold ${execution.response.ok ? 'bg-emerald-500/15 text-emerald-300' : canceled ? 'bg-amber-500/15 text-amber-300' : 'bg-red-500/15 text-red-300'}`}>{execution.response.ok ? 'OK' : canceled ? 'CANCELED' : 'ERR'}</span><span className="text-slate-500">Run {execution.runNumber} · {new Date(execution.at).toLocaleString()}</span><span className="ml-auto font-mono text-slate-500">{formatMs(execution.response.elapsedMs)}</span></div><div className="mt-2 truncate font-mono text-[11px] text-slate-400">{execution.response.executedSql}</div>{execution.response.ok ? <div className="mt-2 space-y-1">{execution.response.statements.map((statement) => <div key={statement.index} className="text-[11px] text-slate-500">Statement {statement.index + 1} completed{statement.rowCount !== null ? ` · ${statement.rowCount} rows affected` : ''}{statement.notices.length > 0 ? ` · ${statement.notices.length} notices` : ''}</div>)}{execution.response.notices.map((notice, index) => <div key={index} className="rounded border border-sky-500/20 bg-sky-500/[0.07] px-2 py-1.5 text-xs text-sky-200">{notice}</div>)}{execution.response.resultSets.some((result) => result.autoLimitApplied) && <div className="text-[11px] text-amber-300">Preview auto-LIMIT is enabled; Excel export reruns the source query without the preview limit.</div>}</div> : <div className={`mt-2 font-mono text-xs ${canceled ? 'text-amber-200' : 'text-red-200'}`}>{execution.response.message}{execution.response.detail && <div className={canceled ? 'mt-1 text-amber-300/60' : 'mt-1 text-red-300/60'}>{execution.response.detail}</div>}</div>}</div>; })}</div>}</div>}
+              {activeSqlTab?.pane === 'messages' && <div className="h-full overflow-y-auto p-3">{activeSqlTab.executions.length === 0 ? <div className="p-4 text-center text-xs text-slate-600">No messages — run a query.</div> : <div className="space-y-2">{[...activeSqlTab.executions].reverse().map((execution) => { const canceled = !execution.response.ok && execution.response.canceled; return <div key={execution.id} className="rounded-lg border border-slate-800 bg-slate-900/60 p-3"><div className="flex items-center gap-2 text-[11px]"><span className={`rounded px-1.5 py-0.5 font-semibold ${execution.response.ok ? 'bg-emerald-500/15 text-emerald-300' : canceled ? 'bg-amber-500/15 text-amber-300' : 'bg-red-500/15 text-red-300'}`}>{execution.response.ok ? 'OK' : canceled ? 'CANCELED' : 'ERR'}</span><span className="text-slate-500">Run {execution.runNumber} · {new Date(execution.at).toLocaleString()}</span><span className="ml-auto font-mono text-slate-500">{formatMs(execution.response.elapsedMs)}</span></div><div className="mt-2 truncate font-mono text-[11px] text-slate-400">{execution.response.executedSql}</div>{execution.response.ok ? <div className="mt-2 space-y-1">{execution.response.statements.map((statement) => <div key={statement.index} className="text-[11px] text-slate-500">Statement {statement.index + 1} completed{statement.rowCount !== null ? ` · ${statement.rowCount} rows affected` : ''}{statement.notices.length > 0 ? ` · ${statement.notices.length} notices` : ''}</div>)}{execution.response.notices.map((notice, index) => <div key={index} className="rounded border border-sky-500/20 bg-sky-500/[0.07] px-2 py-1.5 text-xs text-sky-200">{notice}</div>)}{execution.response.resultSets.some((result) => result.autoLimitApplied) && <div className="text-[11px] text-amber-300">Preview auto-LIMIT is enabled; Excel export reruns the source query without the preview limit.</div>}</div> : <div className={`mt-2 font-mono text-xs ${canceled ? 'text-amber-200' : 'text-red-200'}`}><ErrorDetails error={execution.response} /></div>}</div>; })}</div>}</div>}
 
               {activeSqlTab?.pane === 'history' && <div className="h-full overflow-y-auto p-2">{history.length === 0 ? <div className="p-6 text-center text-xs text-slate-600">History is empty — every execution lands here.</div> : history.map((entry) => <button key={entry.id} onClick={() => handleHistory(entry)} className="mb-1.5 block w-full rounded-xl border border-slate-800/80 bg-slate-900/50 p-2.5 text-left transition hover:border-indigo-500/40 hover:bg-slate-900"><div className="flex items-center gap-2 text-[11px]"><span className={`rounded px-1.5 py-0.5 font-semibold ${entry.ok ? 'bg-emerald-500/15 text-emerald-300' : 'bg-red-500/15 text-red-300'}`}>{entry.ok ? 'OK' : 'ERR'}</span><span className="font-mono text-slate-500">{new Date(entry.at).toLocaleString()}</span><span className="ml-auto font-mono text-slate-500">{formatMs(entry.elapsedMs)}{entry.rowCount !== undefined && ` · ${entry.rowCount} rows`}</span></div><div className="mt-1.5 truncate font-mono text-[11px] text-slate-300">{entry.sql.split('\n')[0]}</div>{!entry.ok && entry.message && <div className="mt-0.5 truncate text-[11px] text-red-300/70">{entry.message}</div>}</button>)}</div>}
             </div>
@@ -510,7 +515,7 @@ export default function App() {
         </main>
       </div>
 
-      <StatusBar elapsedMs={latestResponse?.elapsedMs ?? null} rowCount={statusResult?.rows.length ?? (statusOk && 'rows' in statusOk ? statusOk.rows.length : null)} truncated={!!statusResult?.truncated || !!(statusOk && 'truncated' in statusOk && statusOk.truncated)} autoLimitApplied={!!statusResult?.autoLimitApplied || !!(statusOk && 'autoLimitApplied' in statusOk && statusOk.autoLimitApplied)} noticesCount={statusResult?.notices.length ?? (latestResponse?.ok ? latestResponse.notices.length : 0)} errorCode={statusErr?.code} />
+      <StatusBar elapsedMs={latestResponse?.elapsedMs ?? null} rowCount={statusResult?.rows.length ?? (statusOk && 'rows' in statusOk ? statusOk.rows.length : null)} truncated={!!statusResult?.truncated || !!(statusOk && 'truncated' in statusOk && statusOk.truncated)} autoLimitApplied={!!statusResult?.autoLimitApplied || !!(statusOk && 'autoLimitApplied' in statusOk && statusOk.autoLimitApplied)} noticesCount={statusResult?.notices.length ?? (latestResponse?.ok ? latestResponse.notices.length : 0)} errorCode={statusErr?.code} errorSeverity={statusErr?.severity} />
 
       <ConnectionDialog open={showConnect} initial={DEFAULT_CONN} busy={connectBusy} error={connectError} onClose={() => setShowConnect(false)} onSubmit={doConnect} />
       <ImportWizard open={showImport} connected={connected} database={connInfo?.database} timeoutSec={activeSqlTab?.settings.timeoutSec ?? 30} onClose={() => setShowImport(false)} onImported={onImported} onOperationChange={onImportOperationChange} />

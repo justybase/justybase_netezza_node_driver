@@ -66,6 +66,10 @@ jobs:
           cache: npm
           cache-dependency-path: examples/sql-editor-electron/package-lock.json
 
+      - name: Build local Netezza driver
+        working-directory: .
+        run: npm ci && npm run build
+
       - name: Install example dependencies
         run: npm ci
 

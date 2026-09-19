@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
-import type { NzColumn, NzImportColumn, NzImportPreview, NzImportPreviewResult, NzImportProgress, NzImportResult, NzOperationKind } from '../../../preload/api';
+import ErrorDetails from './ErrorDetails';
+import type { NzColumn, NzErrorPayload, NzImportColumn, NzImportPreview, NzImportPreviewResult, NzImportProgress, NzImportResult, NzOperationKind } from '../../../preload/api';
 
 interface Props {
   open: boolean;
@@ -44,7 +45,7 @@ export default function ImportWizard({ open, connected, database, timeoutSec, on
   const [targetColumns, setTargetColumns] = useState<NzColumn[]>([]);
   const [busy, setBusy] = useState(false);
   const [loadingTarget, setLoadingTarget] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<NzErrorPayload | null>(null);
   const [progress, setProgress] = useState<NzImportProgress | null>(null);
   const [activeOperationId, setActiveOperationId] = useState<string | null>(null);
 
@@ -78,7 +79,7 @@ export default function ImportWizard({ open, connected, database, timeoutSec, on
     try {
       const next: NzImportPreviewResult = await window.nz.previewImport({ operationId: currentOperationId, filePath, ...options });
       if (!('columns' in next)) {
-        setError(next.message);
+        setError(next);
         return;
       }
       setPreview(next);
@@ -86,7 +87,7 @@ export default function ImportWizard({ open, connected, database, timeoutSec, on
       if (resetTarget || !targetTable.trim()) setTargetTable(defaultTableName(filePath));
       setTargetColumns([]);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      setError({ message: cause instanceof Error ? cause.message : String(cause) });
     } finally {
       setBusy(false);
       setActiveOperationId(null);
@@ -117,13 +118,13 @@ export default function ImportWizard({ open, connected, database, timeoutSec, on
     try {
       const next = await window.nz.columns({ database: parts.database || database, schema: parts.schema, table: parts.table });
       setTargetColumns(next);
-      if (next.length === 0) setError('Target table has no visible columns. Check the name and permissions.');
+      if (next.length === 0) setError({ message: 'Target table has no visible columns. Check the name and permissions.' });
       setColumns((current) => current.map((column) => {
         const match = next.find((candidate) => candidate.name.toUpperCase() === column.targetName.toUpperCase() || candidate.name.toUpperCase() === column.sourceName.toUpperCase());
         return match ? { ...column, targetName: match.name, selected: true, targetType: match.type } : { ...column, targetName: '', selected: false };
       }));
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      setError({ message: cause instanceof Error ? cause.message : String(cause) });
     } finally {
       setLoadingTarget(false);
     }
@@ -167,13 +168,13 @@ export default function ImportWizard({ open, connected, database, timeoutSec, on
         }))
       });
       if (!result.ok) {
-        setError(result.message);
+        setError(result);
         return;
       }
       onImported(result);
       onClose();
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      setError({ message: cause instanceof Error ? cause.message : String(cause) });
     } finally {
       setBusy(false);
       setActiveOperationId(null);
@@ -248,7 +249,7 @@ export default function ImportWizard({ open, connected, database, timeoutSec, on
           )}
 
           {!connected && <div className="mt-4 rounded-xl border border-amber-500/25 bg-amber-500/[0.07] px-3 py-2 text-xs text-amber-200">Connect to Netezza before importing. Preview works offline.</div>}
-          {error && <div className="mt-4 rounded-xl border border-red-500/25 bg-red-500/[0.07] px-3 py-2 text-xs text-red-200">{error}</div>}
+          {error && <div className="mt-4 rounded-xl border border-red-500/25 bg-red-500/[0.07] px-3 py-2 text-xs text-red-200"><ErrorDetails error={error} /></div>}
           {progress && busy && <div className="mt-4 rounded-xl border border-indigo-500/20 bg-indigo-500/[0.07] px-3 py-2 text-xs text-indigo-200"><div className="flex justify-between gap-3"><span>{progress.message}</span><span>{progress.percent !== undefined ? `${Math.round(progress.percent)}%` : '…'}</span></div><div className="mt-2 h-1 overflow-hidden rounded bg-slate-800"><div className="h-full rounded bg-indigo-400 transition-all" style={{ width: `${Math.max(3, Math.min(100, progress.percent ?? 8))}%` }} /></div></div>}
         </div>
 
