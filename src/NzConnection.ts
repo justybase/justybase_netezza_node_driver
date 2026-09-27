@@ -16,6 +16,7 @@ import { createNzDatabaseError } from './errors/NzDatabaseError';
 import { substituteParameters } from './protocol/sqlParameters';
 import { parseConnectionString } from './connectionString';
 import { ExternalTableHandler, type ExternalTableIO } from './external/ExternalTableHandler';
+import { NzMetadata } from './metadata/NzMetadata';
 import { normalizeClientType } from './clientTypes';
 import {
     NzProtocolError,
@@ -350,6 +351,13 @@ class NzConnection extends EventEmitter {
     private _activeExecution: Promise<unknown> | null = null;
     private _exportStream: WriteStream | null = null;
     private readonly _external: ExternalTableHandler;
+    private _metadata: NzMetadata | null = null;
+
+    /** Catalog and DDL helpers bound to this connection. */
+    get meta(): NzMetadata {
+        if (!this._metadata) this._metadata = new NzMetadata(this);
+        return this._metadata;
+    }
 
     // Static registry for virtual import streams
     private static _streamRegistry: Map<string, Readable> = new Map();
