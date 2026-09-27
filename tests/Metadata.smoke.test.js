@@ -34,4 +34,44 @@ describeNz('Metadata helpers against Netezza', () => {
         expect((await connection.meta.searchObjects('DIMDATE', 'ADMIN')).length).toBeGreaterThan(0);
         expect((await connection.meta.searchObjectsDetailed('DIMDATE', 'ADMIN')).length).toBeGreaterThan(0);
     });
+
+    test('recreates all catalog DDL object kinds', async () => {
+        const suffix = Math.random().toString(36).slice(2, 10).toUpperCase();
+        const table = 'JB_DDL_T_' + suffix;
+        const view = 'JB_DDL_V_' + suffix;
+        const procedure = 'JB_DDL_P_' + suffix;
+        const synonym = 'JB_DDL_S_' + suffix;
+        const external = 'JB_DDL_E_' + suffix;
+        const cleanup = async () => {
+            for (const sql of [
+                `DROP VIEW ADMIN.${view}`, `DROP PROCEDURE ADMIN.${procedure}()`, `DROP SYNONYM ADMIN.${synonym}`,
+                `DROP TABLE ADMIN.${external}`, `DROP TABLE ADMIN.${table}`,
+            ]) {
+                try { await connection.query(sql); } catch { /* object may not exist */ }
+            }
+        };
+        await cleanup();
+        try {
+            await connection.query(`CREATE TABLE ADMIN.${table}("SELECT" INTEGER) DISTRIBUTE ON ("SELECT")`);
+            await connection.query(`CREATE VIEW ADMIN.${view} AS SELECT "SELECT" FROM ADMIN.${table}`);
+            await connection.query(`CREATE OR REPLACE PROCEDURE ADMIN.${procedure}() RETURNS INTEGER EXECUTE AS OWNER LANGUAGE NZPLSQL AS BEGIN_PROC BEGIN RETURN 1; END; END_PROC;`);
+            await connection.query(`COMMENT ON PROCEDURE ADMIN.${procedure}() IS 'DDL round-trip comment'`);
+            await connection.query(`CREATE SYNONYM ADMIN.${synonym} FOR ADMIN.${table}`);
+            await connection.query(`COMMENT ON SYNONYM ADMIN.${synonym} IS 'DDL round-trip comment'`);
+            await connection.query(`CREATE EXTERNAL TABLE ADMIN.${external}(ID INTEGER, LABEL CHAR(10), EVENT_DATE DATE) USING (DATAOBJECT('/tmp/${external}.csv') FORMAT 'FIXED' RECORDLENGTH 24 RECORDDELIM '\r\n' LAYOUT (BYTES 4, BYTES 10, DATE YMD ' ' BYTES 10))`);
+
+            const metadata = connection.meta;
+            const ddls = [
+                await metadata.getTableDdl(table, 'ADMIN'),
+                await metadata.getViewDdl(view, 'ADMIN'),
+                await metadata.getProcedureDdl(procedure, 'ADMIN'),
+                await metadata.getSynonymDdl(synonym, 'ADMIN'),
+                await metadata.getExternalTableDdl(external, 'ADMIN'),
+            ];
+            await cleanup();
+            for (const ddl of ddls) await connection.query(ddl);
+        } finally {
+            await cleanup();
+        }
+    });
 });

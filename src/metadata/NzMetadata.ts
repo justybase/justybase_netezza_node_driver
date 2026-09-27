@@ -8,6 +8,8 @@ import {
     buildExternalTableDdl,
     buildSynonymDdl,
     externalOptions,
+    isExternalLayoutZoneCount,
+    reconstructExternalLayout,
     quoteIdentifier,
     type DdlColumn,
     type DdlProcedure,
@@ -652,6 +654,7 @@ export class NzMetadata {
         if (!row) throw new Error('Procedure ' + target.name + ' not found');
         const info: DdlProcedure = {
             name: text(row, 'procedure'),
+            signature: optionalText(row, 'proceduresignature'),
             arguments: optionalText(row, 'arguments'),
             returns: optionalText(row, 'returns') ?? 'INTEGER',
             executedAsOwner:
@@ -677,6 +680,18 @@ export class NzMetadata {
         requireUniqueSchema(rows, target.name);
         const row = rows[0];
         if (!row) throw new Error('External table ' + target.name + ' not found');
+        const catalogLayout = row.layout ?? row.LAYOUT;
+        let layoutZones: CatalogRow[] = [];
+        if (isExternalLayoutZoneCount(catalogLayout)) {
+            layoutZones = await this.rows(
+                'SELECT Z.USETYPE, Z.NAME, Z.TYPE, Z.STYLE, Z.LENGTH, Z.DELIMITER,' +
+                ' Z.AROUND, Z.NULLIF, Z.ENDIAN, Z.ALIGNMENT, Z.MODULUS' +
+                ' FROM _v_external E JOIN _v_extzones Z ON E.RELID = Z.RELID' +
+                ' WHERE E.SCHEMA = ' + escapeLiteral(text(row, 'schema')) +
+                ' AND E.TABLENAME = ' + escapeLiteral(target.name) +
+                ' ORDER BY Z.ZONEID'
+            );
+        }
         const actualSchema = text(row, 'schema');
         const columnSql =
             'SELECT C.ATTNAME, C.FORMAT_TYPE, C.ATTNOTNULL' +
@@ -691,13 +706,15 @@ export class NzMetadata {
             typeName: text(item, 'format_type'),
             notNull: boolean(item, 'attnotnull'),
         }));
+        const options = new Map(Object.entries(row));
+        options.set('layout', reconstructExternalLayout(catalogLayout, layoutZones));
         return buildExternalTableDdl(
             database ?? (await this.getCurrentDatabase()) ?? 'UNKNOWN',
             actualSchema,
             target.name,
             optionalText(row, 'extobjname'),
             columns,
-            new Map(Object.entries(row))
+            options
         );
     }
     async getSynonymDdl(synonym: string, schema?: string, database?: string): Promise<string> {
@@ -711,16 +728,14 @@ export class NzMetadata {
         requireUniqueSchema(rows, target.name);
         const row = rows[0];
         if (!row) throw new Error('Synonym ' + target.name + ' not found');
-        let reference = text(row, 'refobjname');
-        if (!reference.includes('.') && optionalText(row, 'refdatabase') && optionalText(row, 'refschema')) {
-            reference = [optionalText(row, 'refdatabase'), optionalText(row, 'refschema'), reference].join('.');
-        }
         return buildSynonymDdl(
             database ?? (await this.getCurrentDatabase()) ?? 'UNKNOWN',
             text(row, 'schema'),
             target.name,
-            reference,
-            optionalText(row, 'description')
+            text(row, 'refobjname'),
+            optionalText(row, 'description'),
+            optionalText(row, 'refdatabase'),
+            optionalText(row, 'refschema')
         );
     }
     async getTablesDdl(schema?: string, pattern?: string, tables?: readonly string[]): Promise<NzDdlBatchResult[]> {
