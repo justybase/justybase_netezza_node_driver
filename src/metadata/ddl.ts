@@ -21,6 +21,7 @@ export interface DdlKey {
 }
 export interface DdlProcedure {
     name: string;
+    signature?: string | null;
     arguments: string | null;
     returns: string;
     executedAsOwner: boolean;
@@ -32,11 +33,67 @@ export interface DdlExternalColumn {
     typeName: string;
     notNull: boolean;
 }
-export type ExternalOptionKind = 'string' | 'number' | 'boolean';
+export type ExternalOptionKind = 'string' | 'number' | 'boolean' | 'compression' | 'layout';
 export interface ExternalOption {
     keyword: string;
     column: string;
     kind: ExternalOptionKind;
+}
+
+function layoutText(value: unknown): string {
+    return value === null || value === undefined ? '' : String(value).trim();
+}
+
+function layoutRawText(value: unknown): string {
+    return value === null || value === undefined ? '' : String(value);
+}
+
+function catalogValue(row: Record<string, unknown>, column: string): unknown {
+    return row[column] ?? row[column.toLowerCase()] ?? row[column.toUpperCase()];
+}
+
+export function isExternalLayoutZoneCount(value: unknown): boolean {
+    if (typeof value === 'number') return Number.isSafeInteger(value) && value > 0;
+    return typeof value === 'string' && /^\d+$/u.test(value.trim()) && Number(value.trim()) > 0;
+}
+
+export function reconstructExternalLayout(catalogLayout: unknown, zones: readonly Record<string, unknown>[]): string | null {
+    if (catalogLayout === null || catalogLayout === undefined) return null;
+    const raw = layoutText(catalogLayout);
+    if (!raw || raw === '0') return null;
+    if (!/^\d+$/u.test(raw)) return raw;
+    const count = Number(raw);
+    if (!Number.isSafeInteger(count) || count <= 0) return null;
+    if (zones.length !== count) {
+        throw new Error(`Cannot reconstruct external table LAYOUT: catalog reports ${count} zones, but _V_EXTZONES returned ${zones.length}`);
+    }
+    return zones.map((row, index) => {
+        const get = (column: string): string => layoutText(catalogValue(row, column));
+        const useType = get('usetype').toUpperCase();
+        if (useType && useType !== 'REF' && useType !== 'FILLER') {
+            throw new Error(`Cannot reconstruct external table LAYOUT: unsupported zone use type ${useType}`);
+        }
+        const name = layoutRawText(catalogValue(row, 'name'));
+        const type = get('type');
+        const style = get('style');
+        const length = get('length');
+        const delimiter = layoutRawText(catalogValue(row, 'delimiter'));
+        const nullIf = get('nullif');
+        if (!length) throw new Error(`Cannot reconstruct external table LAYOUT: zone ${index + 1} has no length`);
+        for (const field of ['around', 'endian', 'alignment', 'modulus']) {
+            if (get(field)) {
+                throw new Error(`Cannot reconstruct external table LAYOUT: zone ${index + 1} uses unsupported ${field.toUpperCase()} metadata`);
+            }
+        }
+        const parts = [useType, name ? quoteIdentifier(name) : '', type, style];
+        if (delimiter) {
+            if (!style) throw new Error(`Cannot reconstruct external table LAYOUT: zone ${index + 1} has a delimiter without a style`);
+            if (!style.includes("'")) parts.push(`'${quoteString(delimiter)}'`);
+        }
+        parts.push(length);
+        if (nullIf) parts.push(/^NULLIF\b/iu.test(nullIf) ? nullIf : `NULLIF ${nullIf}`);
+        return parts.filter(Boolean).join(' ');
+    }).join(', ');
 }
 export const externalOptions: readonly ExternalOption[] = [
     { keyword: 'DELIMITER', column: 'DELIM', kind: 'string' },
@@ -57,7 +114,7 @@ export const externalOptions: readonly ExternalOption[] = [
     { keyword: 'TIMEEXTRAZEROS', column: 'TIMEEXTRAZEROS', kind: 'boolean' },
     { keyword: 'Y2BASE', column: 'Y2BASE', kind: 'number' },
     { keyword: 'FILLRECORD', column: 'FILLRECORD', kind: 'boolean' },
-    { keyword: 'COMPRESS', column: 'COMPRESS', kind: 'boolean' },
+    { keyword: 'COMPRESS', column: 'COMPRESS', kind: 'compression' },
     { keyword: 'INCLUDEHEADER', column: 'INCLUDEHEADER', kind: 'boolean' },
     { keyword: 'LFINSTRING', column: 'LFINSTRING', kind: 'boolean' },
     { keyword: 'DATESTYLE', column: 'DATESTYLE', kind: 'string' },
@@ -72,11 +129,20 @@ export const externalOptions: readonly ExternalOption[] = [
     { keyword: 'RECORDLENGTH', column: 'RECORDLENGTH', kind: 'number' },
     { keyword: 'DATETIMEDELIM', column: 'DATETIMEDELIM', kind: 'string' },
     { keyword: 'REJECTFILE', column: 'REJECTFILE', kind: 'string' },
+    { keyword: 'LAYOUT', column: 'LAYOUT', kind: 'layout' },
+    { keyword: 'INCLUDEZEROSECONDS', column: 'INCLUDEZEROSECONDS', kind: 'boolean' },
+    { keyword: 'MERIDIANDELIM', column: 'MERIDIANDELIM', kind: 'string' },
 ];
 
 export function quoteIdentifier(name: string): string {
-    return /^[A-Z_][A-Z0-9_]*$/.test(name) ? name : '"' + name.replace(/"/g, '""') + '"';
+    return /^[A-Z][A-Z0-9_]*$/.test(name) && !NETEZZA_RESERVED_IDENTIFIERS.has(name)
+        ? name
+        : '"' + name.replace(/"/g, '""') + '"';
 }
+
+const NETEZZA_RESERVED_IDENTIFIERS = new Set(
+    'ABORT ALL ALLOCATE ANALYSE ANALYZE AND ANY AS ASC AUTOMAINT AWSS3 AZUREBLOB BETWEEN BINARY BIT BOTH CASE CAST CHAR CHARACTER CHECK CLUSTER COALESCE COLLATE COLLATION COLUMN CONSTRAINT COPY CROSS CURRENT CURRENT_CATALOG CURRENT_DATE CURRENT_DB CURRENT_SCHEMA CURRENT_SID CURRENT_TIME CURRENT_TIMESTAMP CURRENT_USER CURRENT_USERID CURRENT_USEROID DAYSPERROW DEALLOCATE DEC DECIMAL DECODE DEFAULT DEREGISTER DESC DISTINCT DISTRIBUTE DO ELSE END EXCEPT EXCLUDE EXISTS EXPLAIN EXPRESS EXTEND EXTERNAL EXTRACT FALSE FIRST FLOAT FOLLOWING FOR FOREIGN FROM FULL FUNCTION GENSTATS GLOBAL GROUP HAVING HISTOGRAM IDENTIFIER_CASE ILIKE IN INDEX INITIALLY INNER INOUT INTERSECT INTERVAL INTO JOURNAL LEADING LEFT LIKE LIMIT LOAD LOCAL LOCK MINUS MOVE NATURAL NCHAR NEW NOCASCADE NOT NOTNULL NULL NULLS NUMERIC NVL NVL2 OFFSET OFF OLD ON ONLINE ONLY OR ORDER OTHERS OUT OUTER OVER OVERLAPS PAUSESTEPS PAUSETIME PARTITION POSITION PRECEDING PRECISION PRESERVE PRIMARY REGISTER RESET REUSE RIGHT ROWS SELECT SESSION_USER SETOF SHOW SOME TABLE TEMPORAL THEN TIES TIME TIME_TRAVEL_ENABLE TIMESTAMP TO TRAILING TRANSACTION TRIGGER TRIM TRUE UNBOUNDED UNION UNIQUE USER USING VACUUM VARCHAR VERBOSE VERSION VIEW WHEN WHERE WITH WRITE CTID OID XMIN CMIN XMAX CMAX TABLEOID ROWID DATASLICEID CREATEXID DELETEXID'.split(/\s+/)
+);
 const quoteString = (value: string): string => value.replace(/'/g, "''");
 const qualified = (database: string, schema: string, name: string): string =>
     [database, schema, name].map(quoteIdentifier).join('.');
@@ -153,8 +219,7 @@ export function buildTableDdl(
 }
 
 export function buildViewDdl(database: string, schema: string, view: string, definition: string): string {
-    const body = definition.trim().replace(/;\s*$/, '').trimEnd();
-    return 'CREATE OR REPLACE VIEW ' + qualified(database, schema, view) + ' AS\n' + body + ';';
+    return 'CREATE OR REPLACE VIEW ' + qualified(database, schema, view) + ' AS\n' + (definition || '');
 }
 
 export function buildProcedureDdl(database: string, schema: string, procedure: DdlProcedure): string {
@@ -182,8 +247,12 @@ export function buildProcedureDdl(database: string, schema: string, procedure: D
         procedure.source,
         'END_PROC;',
     ];
-    if (procedure.description)
-        lines.push('COMMENT ON PROCEDURE ' + name + " IS '" + quoteString(procedure.description) + "';");
+    if (procedure.description) {
+        const signatureStart = procedure.signature?.indexOf('(') ?? -1;
+        if (signatureStart < 0) throw new Error('Procedure signature is required to reconstruct its comment');
+        const commentSignature = procedure.signature!.slice(signatureStart);
+        lines.push('COMMENT ON PROCEDURE ' + name + commentSignature + " IS '" + quoteString(procedure.description) + "';");
+    }
     return lines.join('\n');
 }
 
@@ -213,9 +282,24 @@ export function buildExternalTableDdl(
     for (const option of externalOptions) {
         const value = options.get(option.column.toLowerCase());
         if (value === null || value === undefined) continue;
+        if (option.kind === 'layout') {
+            const layout = String(value).trim();
+            if (!layout) continue;
+            const zoneDefinitions = layout.startsWith('(') && layout.endsWith(')')
+                ? layout
+                : '(' + layout + ')';
+            lines.push('    LAYOUT ' + zoneDefinitions);
+            continue;
+        }
         const rendered =
             option.kind === 'string'
                 ? "'" + quoteString(String(value)) + "'"
+                : option.kind === 'compression'
+                  ? ['true', 't', '1', 'yes', 'on'].includes(String(value).trim().toLowerCase())
+                      ? 'true'
+                      : ['false', 'f', '0', 'no', 'off'].includes(String(value).trim().toLowerCase())
+                        ? 'false'
+                        : String(value)
                 : option.kind === 'boolean'
                   ? ['true', 't', '1', 'yes', 'on'].includes(String(value).trim().toLowerCase())
                       ? 'true'
@@ -232,11 +316,63 @@ export function buildSynonymDdl(
     schema: string,
     synonym: string,
     reference: string,
-    description: string | null
+    description: string | null,
+    referenceDatabase: string | null = null,
+    referenceSchema: string | null = null
 ): string {
-    const target = reference.split('.').map(quoteIdentifier).join('.');
+    const parts = splitIdentifierPath(reference);
+    if (parts.length === 1 && referenceDatabase) parts.unshift(referenceDatabase, referenceSchema ?? '');
+    else if (parts.length === 1 && referenceSchema) parts.unshift(referenceSchema);
+    else if (parts.length === 2 && referenceDatabase) parts.unshift(referenceDatabase);
+    const target = parts.map(part => part ? quoteIdentifier(part) : '').join('.');
     const lines = ['CREATE SYNONYM ' + qualified(database, schema, synonym) + ' FOR ' + target + ';'];
     if (description)
-        lines.push('COMMENT ON SYNONYM ' + quoteIdentifier(synonym) + " IS '" + quoteString(description) + "';");
+        lines.push('COMMENT ON SYNONYM ' + qualified(database, schema, synonym) + " IS '" + quoteString(description) + "';");
     return lines.join('\n');
+}
+
+function splitIdentifierPath(value: string): string[] {
+    const rawParts: string[] = [];
+    let current = '';
+    let quoted = false;
+    for (let index = 0; index < value.length; index += 1) {
+        const character = value[index];
+        if (character === '"') {
+            if (quoted && value[index + 1] === '"') {
+                current += '""';
+                index += 1;
+            } else {
+                current += character;
+                quoted = !quoted;
+            }
+        } else if (character === '.' && !quoted) {
+            rawParts.push(current);
+            current = '';
+        } else current += character;
+    }
+    if (quoted) throw new Error('Invalid synonym target: ' + value);
+    rawParts.push(current);
+    const parts = rawParts.map((rawPart) => {
+        const part = rawPart.trim();
+        if (!part.startsWith('"')) {
+            if (part.includes('"')) throw new Error('Invalid synonym target: ' + value);
+            return part;
+        }
+        if (part.length < 2 || !part.endsWith('"')) throw new Error('Invalid synonym target: ' + value);
+        let identifier = '';
+        for (let index = 1; index < part.length - 1; index += 1) {
+            if (part[index] === '"') {
+                if (part[index + 1] !== '"' || index + 1 >= part.length - 1)
+                    throw new Error('Invalid synonym target: ' + value);
+                identifier += '"';
+                index += 1;
+            } else identifier += part[index];
+        }
+        return identifier;
+    });
+    const hasOmittedSchema = parts.length === 3 && parts[0] !== '' && parts[1] === '' && parts[2] !== '';
+    if (parts.length > 3 || (parts.some(part => part === '') && !hasOmittedSchema)) {
+        throw new Error('Invalid synonym target: ' + value);
+    }
+    return parts;
 }
