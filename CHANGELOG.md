@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.3.0] - 2026-09-27
+
+### Added
+- `NzConnection.meta` catalog and DDL helpers (`NzMetadata`, exported from the
+  package root): schemas, databases, tables, columns (including detailed
+  columns), views, procedures, functions, synonyms, sessions, sequences,
+  users, groups, query history, keys, constraints, distribution/organize keys,
+  object details and search, comments and owners.
+- DDL reconstruction for tables, views, procedures, external tables and
+  synonyms, including batch helpers (e.g. `getTablesDdl`) that report a
+  per-object error instead of failing the whole batch.
+- Tests: `tests/MetadataDdl.unit.test.js` (offline DDL reconstruction) and
+  `tests/Metadata.smoke.test.js` (live appliance coverage).
+
+## [3.2.2] - 2026-09-19
+
+### Fixed
+- Preserve Netezza error diagnostics end to end: hardened legacy handshake
+  error-text framing and structured `NzDatabaseError` field parsing so server
+  severity, code, detail and hint survive to callers and the SQL editor error
+  view.
+- Tests: extended `tests/Handshake.unit.test.js` and
+  `tests/NzDatabaseError.unit.test.js`, plus live
+  `tests/LiveErrorHandling.smoke.test.js`.
+
 ## [3.2.1] - 2026-09-17
 
 ### Added
@@ -290,6 +315,9 @@ const str = reader.getString(0); // Recommended
 - Supports CommonJS module format
 - Includes debug logging support via `debug` package
 
+[3.3.0]: https://github.com/justybase/justybase_netezza_node_driver/compare/v3.2.2...v3.3.0
+[3.2.2]: https://github.com/justybase/justybase_netezza_node_driver/compare/v3.2.1...v3.2.2
+[3.2.1]: https://github.com/justybase/justybase_netezza_node_driver/compare/v3.2.0...v3.2.1
 [2.4.3]: https://github.com/justybase/justybase_netezza_node_driver/compare/2.4.2...2.4.3
 [2.3.3]: https://github.com/justybase/justybase_netezza_node_driver/compare/2.3.2...2.3.3
 [2.3.2]: https://github.com/justybase/justybase_netezza_node_driver/compare/2.3.1...2.3.2

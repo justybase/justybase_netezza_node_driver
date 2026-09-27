@@ -287,6 +287,22 @@ async function example() {
 }
 ```
 
+## Catalog metadata and DDL
+
+The connection.meta helper exposes catalog methods for schemas, databases,
+tables, columns, views, procedures, functions, synonyms, sessions, sequences,
+users, groups, query history, keys, comments and owners. It reconstructs DDL
+for tables, views, procedures, external tables and synonyms.
+
+~~~typescript
+const ddl = await connection.meta.getTableDdl('DIMDATE', 'ADMIN');
+const columns = await connection.meta.getDetailedColumns('DIMDATE', 'ADMIN');
+const results = await connection.meta.getTablesDdl('ADMIN', undefined, ['DIMDATE']);
+~~~
+
+Batch DDL results include an error for each object that could not be
+reconstructed. Pass a full signature for an overloaded procedure.
+
 ## Guardium Audit Metadata
 
 ```typescript

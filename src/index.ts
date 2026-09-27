@@ -1,4 +1,24 @@
 export { NzConnection, NzConnectionConfig } from './NzConnection';
+export { NzMetadata } from './metadata/NzMetadata';
+export type {
+    NzTableInfo,
+    NzViewInfo,
+    NzProcedureInfo,
+    NzColumnInfo,
+    NzDetailedColumnInfo,
+    NzTableKeyInfo,
+    NzSequenceInfo,
+    NzFunctionInfo,
+    NzSynonymInfo,
+    NzConstraintInfo,
+    NzDistributionKeyInfo,
+    NzOrganizeKeyInfo,
+    NzObjectDetailInfo,
+    NzObjectInfo,
+    NzPrincipalInfo,
+    NzQueryHistoryInfo,
+    NzDdlBatchResult,
+} from './metadata/NzMetadata';
 export type { QueryResult, QueryResultRow, ExecuteResult } from './NzConnection';
 export { NzCommand } from './NzCommand';
 export { NzDataReader, type ColumnDescription, type ColumnMetadata, type GeneratorItem } from './NzDataReader';
