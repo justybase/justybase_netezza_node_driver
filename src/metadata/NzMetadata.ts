@@ -629,11 +629,18 @@ export class NzMetadata {
         if (!row) throw new Error('View ' + target.name + ' not found');
         const definition = optionalText(row, 'definition');
         if (!definition?.trim()) throw new Error('View ' + target.name + ' has no definition');
+        const actualSchema = text(row, 'schema');
+        const quotedView = quoteIdentifier(target.name);
+        const quotedSchema = quoteIdentifier(actualSchema);
+        const columns = await this.getDetailedColumns(quotedView, quotedSchema);
+        const comment = await this.getTableComment(quotedView, quotedSchema);
         return buildViewDdl(
             database ?? (await this.getCurrentDatabase()) ?? 'UNKNOWN',
-            text(row, 'schema'),
+            actualSchema,
             target.name,
-            definition
+            definition,
+            comment,
+            columns
         );
     }
     async getProcedureDdl(procedure: string, schema?: string, database?: string): Promise<string> {
@@ -685,11 +692,13 @@ export class NzMetadata {
         if (isExternalLayoutZoneCount(catalogLayout)) {
             layoutZones = await this.rows(
                 'SELECT Z.USETYPE, Z.NAME, Z.TYPE, Z.STYLE, Z.LENGTH, Z.DELIMITER,' +
-                ' Z.AROUND, Z.NULLIF, Z.ENDIAN, Z.ALIGNMENT, Z.MODULUS' +
-                ' FROM _v_external E JOIN _v_extzones Z ON E.RELID = Z.RELID' +
-                ' WHERE E.SCHEMA = ' + escapeLiteral(text(row, 'schema')) +
-                ' AND E.TABLENAME = ' + escapeLiteral(target.name) +
-                ' ORDER BY Z.ZONEID'
+                    ' Z.AROUND, Z.NULLIF, Z.ENDIAN, Z.ALIGNMENT, Z.MODULUS' +
+                    ' FROM _v_external E JOIN _v_extzones Z ON E.RELID = Z.RELID' +
+                    ' WHERE E.SCHEMA = ' +
+                    escapeLiteral(text(row, 'schema')) +
+                    ' AND E.TABLENAME = ' +
+                    escapeLiteral(target.name) +
+                    ' ORDER BY Z.ZONEID'
             );
         }
         const actualSchema = text(row, 'schema');
