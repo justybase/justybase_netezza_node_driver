@@ -46,6 +46,14 @@ describe('metadata DDL reconstruction', () => {
 
         expect(buildViewDdl('DB', 'ADMIN', 'V', 'SELECT ID FROM T;'))
             .toBe('CREATE OR REPLACE VIEW DB.ADMIN.V AS\nSELECT ID FROM T;');
+        expect(buildViewDdl('DB', 'ADMIN', 'V Name', 'SELECT ID FROM T;', "owner's view", [
+            { name: 'ID', description: "owner's identifier" },
+            { name: 'EMPTY', description: '  ' },
+        ])).toBe(
+            'CREATE OR REPLACE VIEW DB.ADMIN."V Name" AS\nSELECT ID FROM T;\n\n' +
+            "COMMENT ON VIEW DB.ADMIN.\"V Name\" IS 'owner''s view';\n" +
+            "COMMENT ON COLUMN DB.ADMIN.\"V Name\".ID IS 'owner''s identifier';"
+        );
 
         const procedure = buildProcedureDdl('DB', 'ADMIN', {
             name: 'P', signature: 'P(INTEGER)', arguments: 'x INTEGER', returns: 'INTEGER',

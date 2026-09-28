@@ -57,7 +57,10 @@ export function isExternalLayoutZoneCount(value: unknown): boolean {
     return typeof value === 'string' && /^\d+$/u.test(value.trim()) && Number(value.trim()) > 0;
 }
 
-export function reconstructExternalLayout(catalogLayout: unknown, zones: readonly Record<string, unknown>[]): string | null {
+export function reconstructExternalLayout(
+    catalogLayout: unknown,
+    zones: readonly Record<string, unknown>[]
+): string | null {
     if (catalogLayout === null || catalogLayout === undefined) return null;
     const raw = layoutText(catalogLayout);
     if (!raw || raw === '0') return null;
@@ -65,35 +68,44 @@ export function reconstructExternalLayout(catalogLayout: unknown, zones: readonl
     const count = Number(raw);
     if (!Number.isSafeInteger(count) || count <= 0) return null;
     if (zones.length !== count) {
-        throw new Error(`Cannot reconstruct external table LAYOUT: catalog reports ${count} zones, but _V_EXTZONES returned ${zones.length}`);
+        throw new Error(
+            `Cannot reconstruct external table LAYOUT: catalog reports ${count} zones, but _V_EXTZONES returned ${zones.length}`
+        );
     }
-    return zones.map((row, index) => {
-        const get = (column: string): string => layoutText(catalogValue(row, column));
-        const useType = get('usetype').toUpperCase();
-        if (useType && useType !== 'REF' && useType !== 'FILLER') {
-            throw new Error(`Cannot reconstruct external table LAYOUT: unsupported zone use type ${useType}`);
-        }
-        const name = layoutRawText(catalogValue(row, 'name'));
-        const type = get('type');
-        const style = get('style');
-        const length = get('length');
-        const delimiter = layoutRawText(catalogValue(row, 'delimiter'));
-        const nullIf = get('nullif');
-        if (!length) throw new Error(`Cannot reconstruct external table LAYOUT: zone ${index + 1} has no length`);
-        for (const field of ['around', 'endian', 'alignment', 'modulus']) {
-            if (get(field)) {
-                throw new Error(`Cannot reconstruct external table LAYOUT: zone ${index + 1} uses unsupported ${field.toUpperCase()} metadata`);
+    return zones
+        .map((row, index) => {
+            const get = (column: string): string => layoutText(catalogValue(row, column));
+            const useType = get('usetype').toUpperCase();
+            if (useType && useType !== 'REF' && useType !== 'FILLER') {
+                throw new Error(`Cannot reconstruct external table LAYOUT: unsupported zone use type ${useType}`);
             }
-        }
-        const parts = [useType, name ? quoteIdentifier(name) : '', type, style];
-        if (delimiter) {
-            if (!style) throw new Error(`Cannot reconstruct external table LAYOUT: zone ${index + 1} has a delimiter without a style`);
-            if (!style.includes("'")) parts.push(`'${quoteString(delimiter)}'`);
-        }
-        parts.push(length);
-        if (nullIf) parts.push(/^NULLIF\b/iu.test(nullIf) ? nullIf : `NULLIF ${nullIf}`);
-        return parts.filter(Boolean).join(' ');
-    }).join(', ');
+            const name = layoutRawText(catalogValue(row, 'name'));
+            const type = get('type');
+            const style = get('style');
+            const length = get('length');
+            const delimiter = layoutRawText(catalogValue(row, 'delimiter'));
+            const nullIf = get('nullif');
+            if (!length) throw new Error(`Cannot reconstruct external table LAYOUT: zone ${index + 1} has no length`);
+            for (const field of ['around', 'endian', 'alignment', 'modulus']) {
+                if (get(field)) {
+                    throw new Error(
+                        `Cannot reconstruct external table LAYOUT: zone ${index + 1} uses unsupported ${field.toUpperCase()} metadata`
+                    );
+                }
+            }
+            const parts = [useType, name ? quoteIdentifier(name) : '', type, style];
+            if (delimiter) {
+                if (!style)
+                    throw new Error(
+                        `Cannot reconstruct external table LAYOUT: zone ${index + 1} has a delimiter without a style`
+                    );
+                if (!style.includes("'")) parts.push(`'${quoteString(delimiter)}'`);
+            }
+            parts.push(length);
+            if (nullIf) parts.push(/^NULLIF\b/iu.test(nullIf) ? nullIf : `NULLIF ${nullIf}`);
+            return parts.filter(Boolean).join(' ');
+        })
+        .join(', ');
 }
 export const externalOptions: readonly ExternalOption[] = [
     { keyword: 'DELIMITER', column: 'DELIM', kind: 'string' },
@@ -141,7 +153,9 @@ export function quoteIdentifier(name: string): string {
 }
 
 const NETEZZA_RESERVED_IDENTIFIERS = new Set(
-    'ABORT ALL ALLOCATE ANALYSE ANALYZE AND ANY AS ASC AUTOMAINT AWSS3 AZUREBLOB BETWEEN BINARY BIT BOTH CASE CAST CHAR CHARACTER CHECK CLUSTER COALESCE COLLATE COLLATION COLUMN CONSTRAINT COPY CROSS CURRENT CURRENT_CATALOG CURRENT_DATE CURRENT_DB CURRENT_SCHEMA CURRENT_SID CURRENT_TIME CURRENT_TIMESTAMP CURRENT_USER CURRENT_USERID CURRENT_USEROID DAYSPERROW DEALLOCATE DEC DECIMAL DECODE DEFAULT DEREGISTER DESC DISTINCT DISTRIBUTE DO ELSE END EXCEPT EXCLUDE EXISTS EXPLAIN EXPRESS EXTEND EXTERNAL EXTRACT FALSE FIRST FLOAT FOLLOWING FOR FOREIGN FROM FULL FUNCTION GENSTATS GLOBAL GROUP HAVING HISTOGRAM IDENTIFIER_CASE ILIKE IN INDEX INITIALLY INNER INOUT INTERSECT INTERVAL INTO JOURNAL LEADING LEFT LIKE LIMIT LOAD LOCAL LOCK MINUS MOVE NATURAL NCHAR NEW NOCASCADE NOT NOTNULL NULL NULLS NUMERIC NVL NVL2 OFFSET OFF OLD ON ONLINE ONLY OR ORDER OTHERS OUT OUTER OVER OVERLAPS PAUSESTEPS PAUSETIME PARTITION POSITION PRECEDING PRECISION PRESERVE PRIMARY REGISTER RESET REUSE RIGHT ROWS SELECT SESSION_USER SETOF SHOW SOME TABLE TEMPORAL THEN TIES TIME TIME_TRAVEL_ENABLE TIMESTAMP TO TRAILING TRANSACTION TRIGGER TRIM TRUE UNBOUNDED UNION UNIQUE USER USING VACUUM VARCHAR VERBOSE VERSION VIEW WHEN WHERE WITH WRITE CTID OID XMIN CMIN XMAX CMAX TABLEOID ROWID DATASLICEID CREATEXID DELETEXID'.split(/\s+/)
+    'ABORT ALL ALLOCATE ANALYSE ANALYZE AND ANY AS ASC AUTOMAINT AWSS3 AZUREBLOB BETWEEN BINARY BIT BOTH CASE CAST CHAR CHARACTER CHECK CLUSTER COALESCE COLLATE COLLATION COLUMN CONSTRAINT COPY CROSS CURRENT CURRENT_CATALOG CURRENT_DATE CURRENT_DB CURRENT_SCHEMA CURRENT_SID CURRENT_TIME CURRENT_TIMESTAMP CURRENT_USER CURRENT_USERID CURRENT_USEROID DAYSPERROW DEALLOCATE DEC DECIMAL DECODE DEFAULT DEREGISTER DESC DISTINCT DISTRIBUTE DO ELSE END EXCEPT EXCLUDE EXISTS EXPLAIN EXPRESS EXTEND EXTERNAL EXTRACT FALSE FIRST FLOAT FOLLOWING FOR FOREIGN FROM FULL FUNCTION GENSTATS GLOBAL GROUP HAVING HISTOGRAM IDENTIFIER_CASE ILIKE IN INDEX INITIALLY INNER INOUT INTERSECT INTERVAL INTO JOURNAL LEADING LEFT LIKE LIMIT LOAD LOCAL LOCK MINUS MOVE NATURAL NCHAR NEW NOCASCADE NOT NOTNULL NULL NULLS NUMERIC NVL NVL2 OFFSET OFF OLD ON ONLINE ONLY OR ORDER OTHERS OUT OUTER OVER OVERLAPS PAUSESTEPS PAUSETIME PARTITION POSITION PRECEDING PRECISION PRESERVE PRIMARY REGISTER RESET REUSE RIGHT ROWS SELECT SESSION_USER SETOF SHOW SOME TABLE TEMPORAL THEN TIES TIME TIME_TRAVEL_ENABLE TIMESTAMP TO TRAILING TRANSACTION TRIGGER TRIM TRUE UNBOUNDED UNION UNIQUE USER USING VACUUM VARCHAR VERBOSE VERSION VIEW WHEN WHERE WITH WRITE CTID OID XMIN CMIN XMAX CMAX TABLEOID ROWID DATASLICEID CREATEXID DELETEXID'.split(
+        /\s+/
+    )
 );
 const quoteString = (value: string): string => value.replace(/'/g, "''");
 const qualified = (database: string, schema: string, name: string): string =>
@@ -218,8 +232,31 @@ export function buildTableDdl(
     return lines.join('\n');
 }
 
-export function buildViewDdl(database: string, schema: string, view: string, definition: string): string {
-    return 'CREATE OR REPLACE VIEW ' + qualified(database, schema, view) + ' AS\n' + (definition || '');
+export function buildViewDdl(
+    database: string,
+    schema: string,
+    view: string,
+    definition: string,
+    comment: string | null = null,
+    columns: readonly DdlColumn[] = []
+): string {
+    const name = qualified(database, schema, view);
+    const lines = ['CREATE OR REPLACE VIEW ' + name + ' AS', definition || ''];
+    if (comment?.trim()) lines.push('', 'COMMENT ON VIEW ' + name + " IS '" + quoteString(comment.trim()) + "';");
+    for (const column of columns) {
+        if (column.description?.trim()) {
+            lines.push(
+                'COMMENT ON COLUMN ' +
+                    name +
+                    '.' +
+                    quoteIdentifier(column.name) +
+                    " IS '" +
+                    quoteString(column.description.trim()) +
+                    "';"
+            );
+        }
+    }
+    return lines.join('\n');
 }
 
 export function buildProcedureDdl(database: string, schema: string, procedure: DdlProcedure): string {
@@ -251,7 +288,9 @@ export function buildProcedureDdl(database: string, schema: string, procedure: D
         const signatureStart = procedure.signature?.indexOf('(') ?? -1;
         if (signatureStart < 0) throw new Error('Procedure signature is required to reconstruct its comment');
         const commentSignature = procedure.signature!.slice(signatureStart);
-        lines.push('COMMENT ON PROCEDURE ' + name + commentSignature + " IS '" + quoteString(procedure.description) + "';");
+        lines.push(
+            'COMMENT ON PROCEDURE ' + name + commentSignature + " IS '" + quoteString(procedure.description) + "';"
+        );
     }
     return lines.join('\n');
 }
@@ -285,9 +324,7 @@ export function buildExternalTableDdl(
         if (option.kind === 'layout') {
             const layout = String(value).trim();
             if (!layout) continue;
-            const zoneDefinitions = layout.startsWith('(') && layout.endsWith(')')
-                ? layout
-                : '(' + layout + ')';
+            const zoneDefinitions = layout.startsWith('(') && layout.endsWith(')') ? layout : '(' + layout + ')';
             lines.push('    LAYOUT ' + zoneDefinitions);
             continue;
         }
@@ -300,11 +337,11 @@ export function buildExternalTableDdl(
                       : ['false', 'f', '0', 'no', 'off'].includes(String(value).trim().toLowerCase())
                         ? 'false'
                         : String(value)
-                : option.kind === 'boolean'
-                  ? ['true', 't', '1', 'yes', 'on'].includes(String(value).trim().toLowerCase())
-                      ? 'true'
-                      : 'false'
-                  : String(value);
+                  : option.kind === 'boolean'
+                    ? ['true', 't', '1', 'yes', 'on'].includes(String(value).trim().toLowerCase())
+                        ? 'true'
+                        : 'false'
+                    : String(value);
         lines.push('    ' + option.keyword + ' ' + rendered);
     }
     lines.push(');');
@@ -324,10 +361,12 @@ export function buildSynonymDdl(
     if (parts.length === 1 && referenceDatabase) parts.unshift(referenceDatabase, referenceSchema ?? '');
     else if (parts.length === 1 && referenceSchema) parts.unshift(referenceSchema);
     else if (parts.length === 2 && referenceDatabase) parts.unshift(referenceDatabase);
-    const target = parts.map(part => part ? quoteIdentifier(part) : '').join('.');
+    const target = parts.map((part) => (part ? quoteIdentifier(part) : '')).join('.');
     const lines = ['CREATE SYNONYM ' + qualified(database, schema, synonym) + ' FOR ' + target + ';'];
     if (description)
-        lines.push('COMMENT ON SYNONYM ' + qualified(database, schema, synonym) + " IS '" + quoteString(description) + "';");
+        lines.push(
+            'COMMENT ON SYNONYM ' + qualified(database, schema, synonym) + " IS '" + quoteString(description) + "';"
+        );
     return lines.join('\n');
 }
 
@@ -371,7 +410,7 @@ function splitIdentifierPath(value: string): string[] {
         return identifier;
     });
     const hasOmittedSchema = parts.length === 3 && parts[0] !== '' && parts[1] === '' && parts[2] !== '';
-    if (parts.length > 3 || (parts.some(part => part === '') && !hasOmittedSchema)) {
+    if (parts.length > 3 || (parts.some((part) => part === '') && !hasOmittedSchema)) {
         throw new Error('Invalid synonym target: ' + value);
     }
     return parts;
