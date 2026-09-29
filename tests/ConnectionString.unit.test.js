@@ -62,4 +62,17 @@ describe('parseConnectionString', () => {
     test('rejects invalid URI', () => {
         expect(() => parseConnectionString('not-a-uri')).toThrow(/Invalid connection string/);
     });
+
+    test('does not expose credentials in invalid URI errors', () => {
+        let error;
+        try {
+            parseConnectionString('netezza://user:secret@host:bad/db');
+        } catch (caught) {
+            error = caught;
+        }
+
+        expect(error).toBeInstanceOf(Error);
+        expect(error.message).toBe('Invalid connection string');
+        expect(error.message).not.toContain('secret');
+    });
 });

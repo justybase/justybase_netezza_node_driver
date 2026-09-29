@@ -17,7 +17,7 @@ export function parseConnectionString(connectionString: string): NzConnectionCon
         const normalized = trimmed.replace(/^(nz|netezza):\/\//i, 'http://');
         url = new URL(normalized);
     } catch {
-        throw new Error(`Invalid connection string: ${connectionString}`);
+        throw new Error('Invalid connection string');
     }
 
     if (!url.hostname) {
