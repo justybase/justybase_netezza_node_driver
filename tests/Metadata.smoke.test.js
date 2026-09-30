@@ -64,8 +64,9 @@ describeNz('Metadata helpers against Netezza', () => {
 
             const metadata = connection.meta;
             const viewDdl = await metadata.getViewDdl(view, 'ADMIN');
-            expect(viewDdl).toContain("COMMENT ON VIEW ADMIN." + view + " IS 'DDL round-trip view comment';");
-            expect(viewDdl).toContain(`COMMENT ON COLUMN ADMIN.${view}."SELECT" IS 'DDL round-trip view column comment';`);
+            const qualifiedView = `${await metadata.getCurrentDatabase()}.ADMIN.${view}`;
+            expect(viewDdl).toContain(`COMMENT ON VIEW ${qualifiedView} IS 'DDL round-trip view comment';`);
+            expect(viewDdl).toContain(`COMMENT ON COLUMN ${qualifiedView}."SELECT" IS 'DDL round-trip view column comment';`);
             const viewBatch = await metadata.getViewsDdl('ADMIN', undefined, [view]);
             expect(viewBatch).toHaveLength(1);
             expect(viewBatch[0].ddl).toContain('DDL round-trip view comment');
