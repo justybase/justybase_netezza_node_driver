@@ -1,7 +1,13 @@
-const { Readable } = require('stream');
+const { Readable, Writable } = require('stream');
 
 const { ExternalTableHandler } = require('../dist/cjs/external/ExternalTableHandler');
 const { ExtabSock } = require('../dist/cjs/protocol/constants');
+
+function int32(value) {
+    const buffer = Buffer.alloc(4);
+    buffer.writeInt32BE(value, 0);
+    return buffer;
+}
 
 function createImportInput(filename, bufSize = 64) {
     const filenameBuf = Buffer.from(`${filename}\0`, 'utf8');
@@ -19,7 +25,13 @@ function createImportInput(filename, bufSize = 64) {
     return input;
 }
 
-function createIo(filename, stream, { hasImportStream = true, write = null, bufSize = 64, input: suppliedInput } = {}) {
+function createIo(filename, stream, {
+    hasImportStream = true,
+    write = null,
+    bufSize = 64,
+    input: suppliedInput,
+    exportStream = null,
+} = {}) {
     const input = suppliedInput || createImportInput(filename, bufSize);
     let inputOffset = 0;
     const writes = [];
@@ -45,7 +57,7 @@ function createIo(filename, stream, { hasImportStream = true, write = null, bufS
             events.push({ event, args });
             return true;
         },
-        getExportStream: () => null,
+        getExportStream: () => exportStream,
         setExportStream: () => {},
         hasImportStream: () => hasImportStream,
         getImportStream: () => stream,
@@ -153,4 +165,61 @@ describe('ExternalTableHandler virtual imports', () => {
 
         await expect(new ExternalTableHandler(io).handleExportData()).rejects.toThrow(/externalTableErrorMessage/);
     });
+
+    test('waits for Writable drain before reading the next export chunk', async () => {
+        const payload = Buffer.from('slow export payload');
+        const input = Buffer.concat([
+            Buffer.alloc(8),
+            int32(ExtabSock.DATA),
+            int32(payload.length),
+            payload,
+            int32(ExtabSock.DONE),
+        ]);
+        const output = [];
+        let writeCompleted = false;
+        const sink = new Writable({
+            highWaterMark: 1,
+            write(chunk, _encoding, callback) {
+                setTimeout(() => {
+                    output.push(Buffer.from(chunk));
+                    writeCompleted = true;
+                    callback();
+                }, 5);
+            },
+        });
+        const io = createIo('unused', Readable.from([]), { input, exportStream: sink });
+        const readBytes = io.readBytes;
+        let readCount = 0;
+        io.readBytes = async (length) => {
+            readCount += 1;
+            if (readCount === 6) expect(writeCompleted).toBe(true);
+            return readBytes(length);
+        };
+
+        await new ExternalTableHandler(io).handleExportData();
+
+        expect(output).toEqual([payload]);
+        expect(sink.writableFinished).toBe(true);
+    });
+
+    test('propagates export Writable errors while waiting for drain', async () => {
+        const payload = Buffer.from('bad disk');
+        const input = Buffer.concat([
+            Buffer.alloc(8),
+            int32(ExtabSock.DATA),
+            int32(payload.length),
+            payload,
+            int32(ExtabSock.DONE),
+        ]);
+        const sink = new Writable({
+            highWaterMark: 1,
+            write(_chunk, _encoding, callback) {
+                setImmediate(() => callback(new Error('disk write failed')));
+            },
+        });
+        const io = createIo('unused', Readable.from([]), { input, exportStream: sink });
+
+        await expect(new ExternalTableHandler(io).handleExportData()).rejects.toThrow('disk write failed');
+    });
+
 });

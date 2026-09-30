@@ -54,14 +54,14 @@ function errorMessage({ code = '42P01', message = 'relation does not exist' } = 
     return payloadMessage(BackendMessageCode.ErrorResponse, payload);
 }
 
-function rowDescription() {
+function rowDescription(typeOid = 23) {
     const body = Buffer.alloc(2 + 6 + 4 + 2 + 4 + 1);
     let offset = 0;
     body.writeUInt16BE(1, offset);
     offset += 2;
     Buffer.from('value\0').copy(body, offset);
     offset += 6;
-    body.writeInt32BE(23, offset);
+    body.writeInt32BE(typeOid, offset);
     offset += 4;
     body.writeInt16BE(4, offset);
     offset += 2;
@@ -154,6 +154,58 @@ describe('Netezza protocol framing', () => {
         ]);
         expect(values[1].row).toEqual([42]);
         expect(command._recordsAffected).toBe(1);
+    });
+
+    test('uses a view for a contiguous text DataRow payload', async () => {
+        const bytes = Buffer.concat([
+            payloadMessage(BackendMessageCode.RowDescription, rowDescription(25)),
+            payloadMessage(BackendMessageCode.DataRow, dataRow('first value')),
+            payloadMessage(BackendMessageCode.DataRow, dataRow('second value')),
+            readyMessage(),
+        ]);
+        const { connection } = createConnection(bytes);
+
+        const { values } = await collectResponse(connection);
+
+        expect(values.filter((item) => item.type === 'DataRow').map((item) => item.row)).toEqual([
+            ['first value'],
+            ['second value'],
+        ]);
+        expect(connection.diagnostics.textDataRowViewHits).toBe(2);
+    });
+
+    test('fragmented DataRow payload falls back to an owned buffer', async () => {
+        const bytes = Buffer.concat([
+            payloadMessage(BackendMessageCode.RowDescription, rowDescription()),
+            payloadMessage(BackendMessageCode.DataRow, dataRow()),
+            readyMessage(),
+        ]);
+        const { connection } = createConnection(bytes, { oneByteChunks: true });
+
+        const { values } = await collectResponse(connection);
+
+        expect(values.find((item) => item.type === 'DataRow').row).toEqual([42]);
+        expect(connection.diagnostics.textDataRowViewHits || 0).toBe(0);
+        expect(connection.diagnostics.textDataRowViewFallbacks).toBe(1);
+    });
+
+    test('drains large DBOS batches with stable row order', async () => {
+        const rowCount = 4000;
+        const bytes = Buffer.concat([
+            payloadMessage(BackendMessageCode.RowDescriptionStandard, binaryDescriptor()),
+            ...Array.from({ length: rowCount }, (_, index) => rowStandardMessage(binaryRow(index))),
+            readyMessage(),
+        ]);
+        const { connection } = createConnection(bytes);
+
+        const { values } = await collectResponse(connection);
+        const rows = values.filter((item) => item.type === 'DataRow').map((item) => item.row);
+
+        expect(rows).toHaveLength(rowCount);
+        expect(rows.slice(0, 3)).toEqual([[0], [1], [2]]);
+        expect(rows.at(-1)).toEqual([rowCount - 1]);
+        expect(connection.diagnostics.tryReadDbosBatchRows).toBeGreaterThan(rowCount - 10);
+        expect(connection.diagnostics.batchCacheHits).toBe(connection.diagnostics.tryReadDbosBatchRows);
     });
 
     test('parses a binary RowStandard result and batches the next row', async () => {

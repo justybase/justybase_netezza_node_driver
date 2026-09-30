@@ -256,6 +256,7 @@ class NzConnection extends EventEmitter {
     private _binaryFieldParsers: BinaryFieldParser[] | null = null;
     private _tupdesc: DbosTupleDesc = new DbosTupleDesc();
     private _batchRowCache: unknown[][] | null = null;
+    private _batchRowCacheIndex: number = 0;
     private _varOffsetsScratch: number[] = [];
 
     // Diagnostics counters
@@ -761,6 +762,21 @@ class NzConnection extends EventEmitter {
             this._intBufStart += n;
             return result;
         }
+        return this._readBytesSlow(n);
+    }
+
+    /** Reads a complete in-buffer payload without copying; parsing must finish before the next read. */
+    private async _readBytesView(n: number): Promise<Buffer> {
+        validateProtocolLength(n, 'buffer read');
+        this._diag.readBytesCalls = (this._diag.readBytesCalls || 0) + 1;
+        this._diag.readBytesBytes = (this._diag.readBytesBytes || 0) + n;
+        if (this._intBufEnd - this._intBufStart >= n) {
+            const result = this._intBuf.subarray(this._intBufStart, this._intBufStart + n);
+            this._intBufStart += n;
+            this._diag.textDataRowViewHits = (this._diag.textDataRowViewHits || 0) + 1;
+            return result;
+        }
+        this._diag.textDataRowViewFallbacks = (this._diag.textDataRowViewFallbacks || 0) + 1;
         return this._readBytesSlow(n);
     }
 
@@ -1487,14 +1503,19 @@ class NzConnection extends EventEmitter {
         this._textBufferParsers = null;
         this._binaryFieldParsers = null;
         this._batchRowCache = null;
+        this._batchRowCacheIndex = 0;
         this._tupdesc.clear();
 
         let completed = false;
 
         while (!completed) {
             // Drain batch cache first
-            if (this._batchRowCache && this._batchRowCache.length > 0) {
-                const cached = this._batchRowCache.shift() as unknown[];
+            if (this._batchRowCache && this._batchRowCacheIndex < this._batchRowCache.length) {
+                const cached = this._batchRowCache[this._batchRowCacheIndex++];
+                if (this._batchRowCacheIndex === this._batchRowCache.length) {
+                    this._batchRowCache = null;
+                    this._batchRowCacheIndex = 0;
+                }
                 this._diag.batchCacheHits = (this._diag.batchCacheHits || 0) + 1;
                 this._diag.generatorYields = (this._diag.generatorYields || 0) + 1;
                 this._diag.generatorYieldsDataRow = (this._diag.generatorYieldsDataRow || 0) + 1;
@@ -1564,7 +1585,11 @@ class NzConnection extends EventEmitter {
                 const row = await this._resReadDbosTuple(command);
                 // Try batch-read more rows from internal buffer while data is hot
                 if (!this._batchRowCache) {
-                    this._batchRowCache = this._tryReadDbosBatch();
+                    const cachedRows = this._tryReadDbosBatch();
+                    if (cachedRows.length > 0) {
+                        this._batchRowCache = cachedRows;
+                        this._batchRowCacheIndex = 0;
+                    }
                 }
                 this._diag.generatorYields = (this._diag.generatorYields || 0) + 1;
                 this._diag.generatorYieldsDataRow = (this._diag.generatorYieldsDataRow || 0) + 1;
@@ -1629,7 +1654,7 @@ class NzConnection extends EventEmitter {
             if (type === BackendMessageCode.DataRow) {
                 this._diag.textParseDataRowCalls = (this._diag.textParseDataRowCalls || 0) + 1;
                 const len = validateProtocolLength(await this._readInt32(), 'dataRowPayload');
-                const data = await this._readBytes(len);
+                const data = await this._readBytesView(len);
                 const row = this._parseDataRow(data);
                 this._diag.generatorYields = (this._diag.generatorYields || 0) + 1;
                 this._diag.generatorYieldsDataRow = (this._diag.generatorYieldsDataRow || 0) + 1;

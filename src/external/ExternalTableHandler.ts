@@ -1,4 +1,5 @@
 import * as fs from 'node:fs';
+import { once } from 'node:events';
 import * as path from 'node:path';
 import type { Readable } from 'node:stream';
 import { ExtabSock } from '../protocol/constants';
@@ -106,6 +107,33 @@ export class ExternalTableHandler {
         }
     }
 
+    private async _writeExportChunk(writeStream: fs.WriteStream, data: Buffer): Promise<void> {
+        if (!writeStream.write(data)) {
+            await once(writeStream, 'drain');
+        }
+    }
+
+    private async _finishExportStream(writeStream: fs.WriteStream): Promise<void> {
+        if (writeStream.writableFinished) return;
+
+        const finished = once(writeStream, 'finish').then(() => undefined);
+        let timeout: NodeJS.Timeout | undefined;
+        writeStream.end();
+        try {
+            await Promise.race([
+                finished,
+                new Promise<void>((_resolve, reject) => {
+                    timeout = setTimeout(() => {
+                        writeStream.destroy();
+                        reject(new Error('Timed out waiting for external export stream to finish.'));
+                    }, 5000);
+                }),
+            ]);
+        } finally {
+            if (timeout) clearTimeout(timeout);
+        }
+    }
+
     async handleExportData(): Promise<void> {
         debug('Handle Export Data: Skipping 8 bytes...');
         const skip1 = await this._io.readBytes(4);
@@ -137,43 +165,12 @@ export class ExternalTableHandler {
                 debug('Block Length:', numBytes);
                 const data = await this._io.readBytes(numBytes);
                 if (writeStream) {
-                    writeStream.write(data);
+                    await this._writeExportChunk(writeStream, data);
                 }
             } else if (status === ExtabSock.DONE) {
                 debug('ExternalTable Data Done');
                 if (writeStream) {
-                    await new Promise<void>((resolve) => {
-                        debug('Waiting for writeStream finish...');
-                        if (writeStream.writableFinished) {
-                            debug('Stream already finished');
-                            return resolve();
-                        }
-                        const timeout = setTimeout(() => {
-                            debug('Stream finish timeout! Destroying...');
-                            writeStream.destroy();
-                            resolve();
-                        }, 5000);
-
-                        const onFinish = () => {
-                            debug('Stream finished event');
-                            clearTimeout(timeout);
-                            cleanup();
-                            resolve();
-                        };
-                        const onError = (err: Error) => {
-                            debug('Stream error on end:', err);
-                            clearTimeout(timeout);
-                            cleanup();
-                            resolve();
-                        };
-                        const cleanup = () => {
-                            writeStream.removeListener('finish', onFinish);
-                            writeStream.removeListener('error', onError);
-                        };
-                        writeStream.on('finish', onFinish);
-                        writeStream.on('error', onError);
-                        writeStream.end();
-                    });
+                    await this._finishExportStream(writeStream);
                 }
                 return;
             } else if (status === ExtabSock.ERROR) {
