@@ -272,3 +272,42 @@ path (fact200k NVARCHAR values are 1-3 digit strings); dimdate's longer names
 gain less. Golden digests unchanged.
 
 **Decision: ACCEPTED.**
+
+---
+
+## 7. Read buffer: bounded size, no split-and-unshift
+
+**Problem.**
+
+- `_ensureBufferData` / `_readBytesSlow` called
+  `_ensureBufferCapacity(this._intBufStart + n)`, but the argument means
+  "additional writable bytes". Whenever the read position was far into the
+  buffer this over-asked and doubled the buffer where compaction would do. The
+  buffer never shrank, so it ratcheted up with every large result: reading
+  fact200k on one connection left the buffer at 8 MB, 16 MB, 32 MB, then
+  64 MB after the 6th query, and every idle connection kept it.
+- A socket chunk that did not fit was split: the head was copied, the tail was
+  `unshift`ed back into the stream, and the stream copied it again on the next
+  `read()`.
+
+**Change.**
+
+- Correct capacity request (`n - buffered`).
+- Whole chunks are appended (`_appendChunk`), compacting or growing once if
+  needed. A chunk is bounded by the socket's buffered data, so this does not
+  grow the buffer without bound.
+- After ReadyForQuery a buffer larger than 256 KiB is replaced by a fresh
+  64 KiB one when at most 64 KiB is unread (`_shrinkReadBuffer`; Rust
+  `shrink_if_large`).
+
+| fact200k, same connection | Query 1 | Query 2 | Query 3 | Query 6 |
+| --- | ---: | ---: | ---: | ---: |
+| Buffer before | 8 MiB | 16 MiB | 32 MiB | 64 MiB |
+| Buffer after | 128 KiB | 128 KiB | 128 KiB | 128 KiB |
+
+Time: fact200k FullRead_GetValue 59.8 → 57.5 ms, FullDecode 57.7 → 53.4-55.2 ms
+(small, mostly fewer copies). Regression tests: buffer ≤ 256 KiB across
+repeated fact200k reads; a 1 MiB buffer is released after a response. Both fail
+on the previous code. Golden digests unchanged.
+
+**Decision: ACCEPTED** (mainly a retained-memory fix).

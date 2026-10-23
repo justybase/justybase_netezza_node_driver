@@ -141,6 +141,28 @@ describe('replay: C# .nzreplay fixtures', () => {
         });
     });
 
+    test('the read buffer stays bounded across repeated large results', async () => {
+        const fixture = loadFixture('fact200k');
+        await withReplay(fixture, {}, async (connection) => {
+            for (let i = 0; i < 3; i++) {
+                const result = await digestAll(connection, fixture.query);
+                expect(result.digest).toBe(GOLDEN.fact200k);
+                // Used to double on every query (8 MB, 16 MB, 32 MB, ...).
+                expect(connection._intBuf.length).toBeLessThanOrEqual(256 * 1024);
+            }
+        });
+    });
+
+    test('a read buffer that grew is released after the response', async () => {
+        const fixture = loadFixture('dimdate');
+        await withReplay(fixture, {}, async (connection) => {
+            connection._intBuf = Buffer.alloc(1024 * 1024);
+            const result = await digestAll(connection, fixture.query);
+            expect(result.digest).toBe(GOLDEN.dimdate);
+            expect(connection._intBuf.length).toBe(64 * 1024);
+        });
+    });
+
     test('query() returns row objects for the whole result', async () => {
         const fixture = loadFixture('dimdate');
         await withReplay(fixture, {}, async (connection) => {

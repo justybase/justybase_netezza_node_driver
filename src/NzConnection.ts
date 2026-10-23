@@ -229,6 +229,10 @@ type TextValueParser = (value: string) => unknown;
 type TextBufferParser = (data: Buffer, offset: number, len: number) => unknown;
 type BinaryFieldParser = (buffer: Buffer, fieldStart: number) => unknown;
 
+const READ_BUFFER_INITIAL_SIZE = 65536;
+/** A read buffer above this size is released after each response. */
+const READ_BUFFER_SHRINK_THRESHOLD = 256 * 1024;
+
 const FIELD_FIXED = 0;
 const FIELD_VARYING = 1;
 const FIELD_AFTER_FIXED = 2;
@@ -332,7 +336,7 @@ class NzConnection extends EventEmitter {
     private _intBufEnd: number = 0;
 
     private _initBuffer(): void {
-        this._intBuf = Buffer.allocUnsafe(65536);
+        this._intBuf = Buffer.allocUnsafe(READ_BUFFER_INITIAL_SIZE);
     }
 
     /**
@@ -916,21 +920,13 @@ class NzConnection extends EventEmitter {
         }
 
         if (this._intBuf.length - this._intBufStart < n) {
-            this._ensureBufferCapacity(this._intBufStart + n);
+            this._ensureBufferCapacity(n - (this._intBufEnd - this._intBufStart));
         }
 
         while (this._intBufEnd - this._intBufStart < n) {
             const chunk = stream.read() as Buffer | null;
             if (chunk !== null) {
-                const space = this._intBuf.length - this._intBufEnd;
-                if (chunk.length <= space) {
-                    chunk.copy(this._intBuf, this._intBufEnd);
-                    this._intBufEnd += chunk.length;
-                } else {
-                    chunk.copy(this._intBuf, this._intBufEnd, 0, space);
-                    this._intBufEnd += space;
-                    stream.unshift(chunk.slice(space));
-                }
+                this._appendChunk(chunk);
             } else {
                 await this._waitForReadable();
             }
@@ -1028,6 +1024,32 @@ class NzConnection extends EventEmitter {
             throw new Error('Connection is closed');
         }
         return stream;
+    }
+
+    /**
+     * Appends a whole socket chunk, compacting or growing the buffer when it
+     * does not fit. Splitting it and `unshift`ing the rest back into the
+     * stream made the stream copy those bytes again on the next read. A
+     * chunk is bounded by the socket's buffered data (about its high-water
+     * mark), and the buffer shrinks back after each response.
+     */
+    private _appendChunk(chunk: Buffer): void {
+        if (this._intBuf.length - this._intBufEnd < chunk.length) {
+            this._ensureBufferCapacity(chunk.length);
+        }
+        chunk.copy(this._intBuf, this._intBufEnd);
+        this._intBufEnd += chunk.length;
+    }
+
+    /** Releases a read buffer that grew for a large response once it is nearly empty again. */
+    private _shrinkReadBuffer(): void {
+        const buffered = this._intBufEnd - this._intBufStart;
+        if (this._intBuf.length <= READ_BUFFER_SHRINK_THRESHOLD || buffered > READ_BUFFER_INITIAL_SIZE) return;
+        const newBuf = Buffer.allocUnsafe(READ_BUFFER_INITIAL_SIZE);
+        if (buffered > 0) this._intBuf.copy(newBuf, 0, this._intBufStart, this._intBufEnd);
+        this._intBuf = newBuf;
+        this._intBufStart = 0;
+        this._intBufEnd = buffered;
     }
 
     /** Copy any already-buffered socket bytes into the internal parse buffer. */
@@ -1243,22 +1265,14 @@ class NzConnection extends EventEmitter {
         if (this._intBufEnd - this._intBufStart >= n) return;
 
         if (this._intBuf.length - this._intBufStart < n) {
-            this._ensureBufferCapacity(this._intBufStart + n);
+            this._ensureBufferCapacity(n - (this._intBufEnd - this._intBufStart));
         }
 
         const stream = this._assertReadableStream();
         while (this._intBufEnd - this._intBufStart < n) {
             const chunk = stream.read() as Buffer | null;
             if (chunk !== null) {
-                const space = this._intBuf.length - this._intBufEnd;
-                if (chunk.length <= space) {
-                    chunk.copy(this._intBuf, this._intBufEnd);
-                    this._intBufEnd += chunk.length;
-                } else {
-                    chunk.copy(this._intBuf, this._intBufEnd, 0, space);
-                    this._intBufEnd += space;
-                    stream.unshift(chunk.slice(space));
-                }
+                this._appendChunk(chunk);
             } else {
                 await this._waitForReadable();
             }
@@ -1722,6 +1736,7 @@ class NzConnection extends EventEmitter {
 
                 if (type === BackendMessageCode.ReadyForQuery) {
                     completed = true;
+                    this._shrinkReadBuffer();
                     this._diag.generatorYields++;
                     yield { type: 'ReadyForQuery' };
                     continue;
@@ -1729,6 +1744,7 @@ class NzConnection extends EventEmitter {
 
                 if (type === BackendMessageCode.ReadyForQueryAlt) {
                     completed = true;
+                    this._shrinkReadBuffer();
                     continue;
                 }
                 if (type === BackendMessageCode.ControlZero || type === BackendMessageCode.ControlA) {
