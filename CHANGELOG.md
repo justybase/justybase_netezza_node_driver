@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.4.4] - 2026-10-23
+
 ### Changed
 - Faster result reading, measured offline on the C# reference driver's replay
   captures (see `PERFORMANCE.md`): fact200k (200000×7) full read 165 → 58 ms,
