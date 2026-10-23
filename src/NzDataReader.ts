@@ -116,6 +116,8 @@ class NzDataReader<TRow = QueryResultRow> {
     generator: AsyncGenerator<GeneratorItem>;
     columnDescriptions: ColumnDescription[];
     releaseCallback: (() => void) | null;
+    /** Switches the response source to skip unread rows instead of decoding them. */
+    discardRowsCallback: (() => void) | null;
     /**
      * The current row's column values, typed through the reader's `TRow`.
      * `null` when there is no current row. Prefer the typed getters
@@ -141,13 +143,15 @@ class NzDataReader<TRow = QueryResultRow> {
         columns: ColumnDescription[] | null,
         columnNullability: boolean[] | null,
         releaseCallback: (() => void) | null,
-        initialNextItem: GeneratorItem | null
+        initialNextItem: GeneratorItem | null,
+        discardRowsCallback: (() => void) | null = null
     ) {
         this.command = command;
         this.generator = generator;
         this.columnDescriptions = [];
         this._columnNullability = null;
         this.releaseCallback = releaseCallback;
+        this.discardRowsCallback = discardRowsCallback;
 
         this._setColumnState(columns, columnNullability);
         this._nextItem = initialNextItem;
@@ -808,6 +812,9 @@ class NzDataReader<TRow = QueryResultRow> {
         if (!this.closed) {
             this.closed = true;
             if (!this._isFinished && this.generator) {
+                // The protocol requires reading up to ReadyForQuery, but rows
+                // nobody will read only need to be skipped, not decoded.
+                if (this.discardRowsCallback) this.discardRowsCallback();
                 try {
                     for await (const val of this.generator) {
                         if (val.type === 'NoticeResponse') {

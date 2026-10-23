@@ -257,6 +257,8 @@ class NzConnection extends EventEmitter {
     private _tupdesc: DbosTupleDesc = new DbosTupleDesc();
     private _batchRowCache: unknown[][] | null = null;
     private _batchRowCacheIndex: number = 0;
+    /** Set by `NzDataReader.close()`: skip the remaining rows of the response by length, without decoding. */
+    private _discardRows: boolean = false;
     private _varOffsetsScratch: number[] = [];
 
     // Diagnostics counters
@@ -288,6 +290,7 @@ class NzConnection extends EventEmitter {
             textParseDataRowCalls: 0,
             textParseSlowPath: 0,
             textParseFastPath: 0,
+            discardedRows: 0,
         };
     }
 
@@ -751,6 +754,58 @@ class NzConnection extends EventEmitter {
         validateProtocolLength(n, 'buffer skip');
         await this._ensureBufferData(n);
         this._intBufStart += n;
+    }
+
+    /** Skips `n` bytes without growing the internal buffer (draining unread rows). */
+    private async _discardBytes(n: number): Promise<void> {
+        validateProtocolLength(n, 'buffer discard');
+        const buffered = this._intBufEnd - this._intBufStart;
+        if (buffered >= n) {
+            this._intBufStart += n;
+            return;
+        }
+        this._intBufStart = 0;
+        this._intBufEnd = 0;
+        let remaining = n - buffered;
+        const stream = this._assertReadableStream();
+        while (remaining > 0) {
+            const chunk = stream.read() as Buffer | null;
+            if (chunk === null) {
+                await this._waitForReadable();
+            } else if (chunk.length <= remaining) {
+                remaining -= chunk.length;
+            } else {
+                this._feedBuffer(chunk.subarray(remaining));
+                remaining = 0;
+            }
+        }
+    }
+
+    /** Called by the reader before it drains the rest of the response. */
+    _beginDiscardingRows(): void {
+        this._discardRows = true;
+        this._batchRowCache = null;
+        this._batchRowCacheIndex = 0;
+    }
+
+    /**
+     * Skips every complete RowStandard frame already buffered, so a drain does
+     * not go back through the generator for each row. Returns the row count.
+     */
+    private _discardBufferedDbosRows(): number {
+        let rows = 0;
+        while (
+            this._intBufEnd - this._intBufStart >= 13 &&
+            this._intBuf[this._intBufStart] === BackendMessageCode.RowStandard
+        ) {
+            const rowLen = this._intBuf.readInt32BE(this._intBufStart + 9);
+            validateProtocolLength(rowLen, 'rowStandardPayload', { allowZero: false });
+            const frameEnd = this._intBufStart + 13 + rowLen;
+            if (frameEnd > this._intBufEnd) break;
+            this._intBufStart = frameEnd;
+            rows++;
+        }
+        return rows;
     }
 
     private async _readBytes(n: number): Promise<Buffer> {
@@ -1394,7 +1449,8 @@ class NzConnection extends EventEmitter {
                 () => {
                     this._executing = false;
                 },
-                initialNextItem as GeneratorItem | null
+                initialNextItem as GeneratorItem | null,
+                () => this._beginDiscardingRows()
             ) as unknown as NzDataReader<T>;
         } catch (e) {
             if (sentQuery === null) {
@@ -1504,6 +1560,7 @@ class NzConnection extends EventEmitter {
         this._binaryFieldParsers = null;
         this._batchRowCache = null;
         this._batchRowCacheIndex = 0;
+        this._discardRows = false;
         this._tupdesc.clear();
 
         let completed = false;
@@ -1582,6 +1639,14 @@ class NzConnection extends EventEmitter {
 
             if (type === BackendMessageCode.RowStandard) {
                 await this._skipBytes(4);
+                if (this._discardRows) {
+                    await this._ensureBufferData(8);
+                    const rowLength = this._intBuf.readInt32BE(this._intBufStart + 4);
+                    validateProtocolLength(rowLength, 'rowStandardPayload', { allowZero: false });
+                    await this._discardBytes(8 + rowLength);
+                    this._diag.discardedRows += 1 + this._discardBufferedDbosRows();
+                    continue;
+                }
                 const row = await this._resReadDbosTuple(command);
                 // Try batch-read more rows from internal buffer while data is hot
                 if (!this._batchRowCache) {
@@ -1652,8 +1717,13 @@ class NzConnection extends EventEmitter {
             }
 
             if (type === BackendMessageCode.DataRow) {
-                this._diag.textParseDataRowCalls = (this._diag.textParseDataRowCalls || 0) + 1;
                 const len = validateProtocolLength(await this._readInt32(), 'dataRowPayload');
+                if (this._discardRows) {
+                    await this._discardBytes(len);
+                    this._diag.discardedRows++;
+                    continue;
+                }
+                this._diag.textParseDataRowCalls = (this._diag.textParseDataRowCalls || 0) + 1;
                 const data = await this._readBytesView(len);
                 const row = this._parseDataRow(data);
                 this._diag.generatorYields = (this._diag.generatorYields || 0) + 1;

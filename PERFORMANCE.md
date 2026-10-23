@@ -64,3 +64,31 @@ microtasks and `read()` ~25%, `utf8Slice`/`toString` (NVARCHAR) ~13%,
 
 Gap to C#: ~3.7× on fact200k full read. `Read1_Dispose` costs almost as much
 as a full read because `NzDataReader.close()` decodes every remaining row.
+
+---
+
+## 1. Fast discard drain on `close()`
+
+**Problem.** `NzDataReader.close()` iterated the response generator, which
+fully decoded every remaining row (strings, numerics, dates) only to drop it.
+`SELECT 200k; read(); close()` cost almost a full read.
+
+**Change.** The reader asks the connection to discard (`_beginDiscardingRows`)
+before draining. RowStandard (`Y`) and DataRow (`D`) frames are then skipped by
+their length; consecutive buffered `Y` frames are skipped in one synchronous
+loop; payloads larger than the buffer are discarded chunk by chunk without
+growing it (`_discardBytes`). Notices, errors and ReadyForQuery still go through
+the normal path. `diagnostics.discardedRows` counts skipped rows. Same design as
+the C# `DoNextStepDiscardingRows` / Rust `discard_exact`.
+
+| Fixture | Scenario | Before ms | After ms |
+| --- | --- | ---: | ---: |
+| dimdate | Read1_Dispose | 4.02 | 1.46 |
+| dimdate | Read10_Dispose | 4.47 | 1.09 |
+| fact200k | Read1_Dispose | 131.92 | 5.23 |
+| fact200k | Read10_Dispose | 131.54 | 5.50 |
+
+fact200k early close: **−96%** (the C# reference needs ~9-10 ms for the same
+drain). Full reads are unchanged. Golden digests unchanged.
+
+**Decision: ACCEPTED.**
