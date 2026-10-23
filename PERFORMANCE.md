@@ -133,3 +133,22 @@ reads per row.
 fact200k full read **−28%**, GC per op roughly halved. Golden digests unchanged.
 
 **Decision: ACCEPTED.**
+
+---
+
+## 3. Bounded decode batch
+
+**Idea.** Cap `_tryReadDbosBatch` (Rust uses 256-row batches) to reduce memory
+spikes and wasted decoding before an early `close()`.
+
+| fact200k FullRead_GetValue | 64 | 256 | 1024 | unbounded |
+| --- | ---: | ---: | ---: | ---: |
+| Median ms | 113.4 | 110.7 | 106.5 | 102.9 |
+| GC/op | 22.3 | 11.7 | 7.7 | 5.4 |
+
+Smaller batches only add generator resumptions and garbage. The batch is
+already bounded by what is in the read buffer (tens of KB), and early close
+now discards instead of decoding (step 1), so `Read10_Dispose` is the same in
+every variant (~5.8 ms).
+
+**Decision: REJECTED.** No code change.
