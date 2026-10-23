@@ -350,7 +350,7 @@ class NzConnection extends EventEmitter {
             if (remaining > 0) {
                 this._intBuf.copy(this._intBuf, 0, this._intBufStart, this._intBufEnd);
             }
-            this._diag.ensureBufferCompactions = (this._diag.ensureBufferCompactions || 0) + 1;
+            this._diag.ensureBufferCompactions++;
             this._intBufStart = 0;
             this._intBufEnd = remaining;
             return;
@@ -362,7 +362,7 @@ class NzConnection extends EventEmitter {
         if (remaining > 0) {
             this._intBuf.copy(newBuf, 0, this._intBufStart, this._intBufEnd);
         }
-        this._diag.ensureBufferRegrows = (this._diag.ensureBufferRegrows || 0) + 1;
+        this._diag.ensureBufferRegrows++;
         this._intBuf = newBuf;
         this._intBufStart = 0;
         this._intBufEnd = remaining;
@@ -858,8 +858,8 @@ class NzConnection extends EventEmitter {
 
     private async _readBytes(n: number): Promise<Buffer> {
         validateProtocolLength(n, 'buffer read');
-        this._diag.readBytesCalls = (this._diag.readBytesCalls || 0) + 1;
-        this._diag.readBytesBytes = (this._diag.readBytesBytes || 0) + n;
+        this._diag.readBytesCalls++;
+        this._diag.readBytesBytes += n;
         if (this._intBufEnd - this._intBufStart >= n) {
             const result = Buffer.from(this._intBuf.subarray(this._intBufStart, this._intBufStart + n));
             this._intBufStart += n;
@@ -871,21 +871,21 @@ class NzConnection extends EventEmitter {
     /** Reads a complete in-buffer payload without copying; parsing must finish before the next read. */
     private async _readBytesView(n: number): Promise<Buffer> {
         validateProtocolLength(n, 'buffer read');
-        this._diag.readBytesCalls = (this._diag.readBytesCalls || 0) + 1;
-        this._diag.readBytesBytes = (this._diag.readBytesBytes || 0) + n;
+        this._diag.readBytesCalls++;
+        this._diag.readBytesBytes += n;
         if (this._intBufEnd - this._intBufStart >= n) {
             const result = this._intBuf.subarray(this._intBufStart, this._intBufStart + n);
             this._intBufStart += n;
-            this._diag.textDataRowViewHits = (this._diag.textDataRowViewHits || 0) + 1;
+            this._diag.textDataRowViewHits++;
             return result;
         }
-        this._diag.textDataRowViewFallbacks = (this._diag.textDataRowViewFallbacks || 0) + 1;
+        this._diag.textDataRowViewFallbacks++;
         return this._readBytesSlow(n);
     }
 
     private async _readBytesSlow(n: number): Promise<Buffer> {
-        this._diag.readBytesSlowCalls = (this._diag.readBytesSlowCalls || 0) + 1;
-        this._diag.readBytesSlowBytes = (this._diag.readBytesSlowBytes || 0) + n;
+        this._diag.readBytesSlowCalls++;
+        this._diag.readBytesSlowBytes += n;
         const stream = this._assertReadableStream();
         if (n > this._intBuf.length) {
             const chunks: Buffer[] = [];
@@ -1616,9 +1616,9 @@ class NzConnection extends EventEmitter {
                         this._batchRowCache = null;
                         this._batchRowCacheIndex = 0;
                     }
-                    this._diag.batchCacheHits = (this._diag.batchCacheHits || 0) + 1;
-                    this._diag.generatorYields = (this._diag.generatorYields || 0) + 1;
-                    this._diag.generatorYieldsDataRow = (this._diag.generatorYieldsDataRow || 0) + 1;
+                    this._diag.batchCacheHits++;
+                    this._diag.generatorYields++;
+                    this._diag.generatorYieldsDataRow++;
                     yield { type: 'DataRow', row: cached };
                     continue;
                 }
@@ -1699,8 +1699,8 @@ class NzConnection extends EventEmitter {
                             this._batchRowCacheIndex = 0;
                         }
                     }
-                    this._diag.generatorYields = (this._diag.generatorYields || 0) + 1;
-                    this._diag.generatorYieldsDataRow = (this._diag.generatorYieldsDataRow || 0) + 1;
+                    this._diag.generatorYields++;
+                    this._diag.generatorYieldsDataRow++;
                     yield { type: 'DataRow', row };
                     continue;
                 }
@@ -1714,15 +1714,15 @@ class NzConnection extends EventEmitter {
                     debug('CommandComplete:', commandText);
                     const rowsAffected = parseCommandCompleteRows(commandText);
                     command._recordsAffected = rowsAffected;
-                    this._diag.generatorYields = (this._diag.generatorYields || 0) + 1;
-                    this._diag.generatorYieldsCmdComplete = (this._diag.generatorYieldsCmdComplete || 0) + 1;
+                    this._diag.generatorYields++;
+                    this._diag.generatorYieldsCmdComplete++;
                     yield { type: 'CommandComplete', text: commandText, rowsAffected };
                     continue;
                 }
 
                 if (type === BackendMessageCode.ReadyForQuery) {
                     completed = true;
-                    this._diag.generatorYields = (this._diag.generatorYields || 0) + 1;
+                    this._diag.generatorYields++;
                     yield { type: 'ReadyForQuery' };
                     continue;
                 }
@@ -1753,8 +1753,8 @@ class NzConnection extends EventEmitter {
                     const len = validateProtocolLength(await this._readInt32(), 'rowDescriptionPayload');
                     const data = await this._readBytes(len);
                     this._parseRowDescription(data, command);
-                    this._diag.generatorYields = (this._diag.generatorYields || 0) + 1;
-                    this._diag.generatorYieldsRowDesc = (this._diag.generatorYieldsRowDesc || 0) + 1;
+                    this._diag.generatorYields++;
+                    this._diag.generatorYieldsRowDesc++;
                     yield { type: 'RowDescription', columns: this._rowDescription as unknown as ColumnInfo[] };
                     continue;
                 }
@@ -1766,7 +1766,7 @@ class NzConnection extends EventEmitter {
                         this._diag.discardedRows++;
                         continue;
                     }
-                    this._diag.textParseDataRowCalls = (this._diag.textParseDataRowCalls || 0) + 1;
+                    this._diag.textParseDataRowCalls++;
                     const data = await this._readBytesView(len);
                     const row = this._parseDataRow(data);
                     if (!this._batchRowCache) {
@@ -1776,8 +1776,8 @@ class NzConnection extends EventEmitter {
                             this._batchRowCacheIndex = 0;
                         }
                     }
-                    this._diag.generatorYields = (this._diag.generatorYields || 0) + 1;
-                    this._diag.generatorYieldsDataRow = (this._diag.generatorYieldsDataRow || 0) + 1;
+                    this._diag.generatorYields++;
+                    this._diag.generatorYieldsDataRow++;
                     yield { type: 'DataRow', row };
                     continue;
                 }
@@ -1813,7 +1813,9 @@ class NzConnection extends EventEmitter {
     }
 
     private _parseRowDescription(data: Buffer, command: NzCommand): void {
-        debug('parseRowDescription data length:', data.length, 'hex:', data.toString('hex').substring(0, 100));
+        if (debug.enabled) {
+            debug('parseRowDescription data length:', data.length, 'hex:', data.toString('hex', 0, 50));
+        }
         let offset = 0;
         if (data.length < 2) {
             throw new NzProtocolError(
@@ -1911,10 +1913,10 @@ class NzConnection extends EventEmitter {
             // Fast path: parse directly from Buffer for known types
             const bufParser = this._textBufferParsers?.[columnNumber];
             if (bufParser) {
-                this._diag.textParseFastPath = (this._diag.textParseFastPath || 0) + 1;
+                this._diag.textParseFastPath++;
                 row[columnNumber] = bufParser(data, dataIdx, actualLen);
             } else {
-                this._diag.textParseSlowPath = (this._diag.textParseSlowPath || 0) + 1;
+                this._diag.textParseSlowPath++;
                 const colDesc = (this._rowDescription as ColumnInfo[])[columnNumber];
                 const value = data.toString('utf8', dataIdx, dataIdx + actualLen);
                 const parser = this._textColumnParsers?.[columnNumber];
@@ -1928,7 +1930,7 @@ class NzConnection extends EventEmitter {
     }
 
     private async _resReadDbosTuple(_command: NzCommand): Promise<unknown[]> {
-        this._diag.resReadDbosTupleCalls = (this._diag.resReadDbosTupleCalls || 0) + 1;
+        this._diag.resReadDbosTupleCalls++;
         // In-place parsing: read from _intBuf directly without copying
         await this._ensureBufferData(8);
         const rowLength = this._intBuf.readInt32BE(this._intBufStart + 4);
@@ -2093,7 +2095,7 @@ class NzConnection extends EventEmitter {
                 this._varOffsetsScratch = new Array(numVaryingFields);
             }
             varFieldStarts = this._varOffsetsScratch;
-            this._diag.parseDbosRowVarOffsetsAlloc = (this._diag.parseDbosRowVarOffsetsAlloc || 0) + 1;
+            this._diag.parseDbosRowVarOffsetsAlloc++;
             let voff = baseOffset + fixedFieldsSize;
             for (let j = 0; j < numVaryingFields; j++) {
                 if (voff < baseOffset || voff + 2 > endOffset) {
@@ -2210,12 +2212,12 @@ class NzConnection extends EventEmitter {
      */
     private _tryReadDbosBatch(): unknown[][] {
         const rows: unknown[][] = [];
-        this._diag.tryReadDbosBatchCalls = (this._diag.tryReadDbosBatchCalls || 0) + 1;
+        this._diag.tryReadDbosBatchCalls++;
 
         while (true) {
             const available = this._intBufEnd - this._intBufStart;
             if (available < 1) break;
-            this._diag.tryReadDbosBatchPeeks = (this._diag.tryReadDbosBatchPeeks || 0) + 1;
+            this._diag.tryReadDbosBatchPeeks++;
 
             // Next byte should be 'Y' (RowStandard)
             if (this._intBuf[this._intBufStart] !== 89) break;
@@ -2241,7 +2243,7 @@ class NzConnection extends EventEmitter {
             this._intBufStart = payloadEnd;
         }
 
-        this._diag.tryReadDbosBatchRows = (this._diag.tryReadDbosBatchRows || 0) + rows.length;
+        this._diag.tryReadDbosBatchRows += rows.length;
         return rows;
     }
 
