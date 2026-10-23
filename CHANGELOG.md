@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- Faster result reading, measured offline on the C# reference driver's replay
+  captures (see `PERFORMANCE.md`): fact200k (200000×7) full read 165 → 58 ms,
+  dimdate (3652×19) 6.5 → 4.2 ms, a 50000-row text-protocol result 270 → 53 ms.
+  Returned values and their JS types are unchanged (pinned by golden digests).
+- Closing a reader early skips the unread rows by length instead of decoding
+  them (fact200k read one row + close: 150 → 6 ms).
+- `read()` returns already-decoded rows without resuming the response
+  generator; NUMERIC, TIMESTAMP, TIME and text-protocol values are decoded
+  without BigInt, regex or intermediate strings; short strings skip the native
+  decoder.
+
+### Fixed
+- The internal read buffer doubled on every large result and was never
+  released (one connection reading fact200k repeatedly held 8, 16, 32 then
+  64 MiB). It now stays bounded and is released after a large response.
+- A malformed row that was already in the read-ahead batch raised its protocol
+  error from an earlier `read()` (or from `executeReader()`) instead of the
+  `read()` that reaches it.
+
+### Added
+- Offline replay tests and benchmark: `tests/Replay.unit.test.js`,
+  `npm run bench:replay` (fixtures shared with the C# and Rust drivers).
+
 ## [3.3.0] - 2026-09-27
 
 ### Added

@@ -38,6 +38,31 @@ C# reference on the same fixtures (.NET 10 NativeAOT, same machine, from its
 `PERFORMANCE.md`): dimdate full read ~2.3 ms, fact200k full read ~42.5 ms;
 read 1 row + dispose: dimdate ~0 ms, fact200k ~9-10 ms (socket transfer only).
 
+## Summary
+
+Same session, 15 samples, 3.4.3 build vs this branch (median ms):
+
+| Fixture | Scenario | 3.4.3 | Now | Speed-up | C# reference |
+| --- | --- | ---: | ---: | ---: | ---: |
+| dimdate | FullRead_GetValue | 6.48 | 4.21 | 1.5× | ~2.3 |
+| dimdate | Read1_Dispose | 4.74 | 1.34 | 3.5× | ~0 |
+| dimdate | Query_RowObjects | 8.09 | 5.14 | 1.6× | – |
+| fact200k | FullRead_GetValue | 164.92 | 57.84 | 2.9× | ~42.5 |
+| fact200k | FullDecode_NoGetValue | 151.03 | 51.83 | 2.9× | ~32 |
+| fact200k | Read1_Dispose | 149.92 | 6.28 | 24× | ~9-10 |
+| fact200k | ForAwait_RowObjects | 209.34 | 92.04 | 2.3× | – |
+| fact200k | Query_RowObjects | 239.29 | 89.70 | 2.7× | – |
+| text50k | FullRead_GetValue | 269.60 | 52.64 | 5.1× | – |
+| text50k | Read1_Dispose | 143.49 | 3.63 | 40× | – |
+
+Remaining gap to C# on fact200k full read: ~1.4×. Not attempted:
+
+- Lazy column decoding (C# opt-in, 2-3× for 1-2 of many columns). In Node the
+  public `currentRow` array and the read-ahead batch, whose rows point into a
+  buffer that gets reused, would both need an API change.
+- Row objects (`query()`, `for await`): the remaining cost is allocating
+  the objects and the GC of the retained result, not the driver.
+
 ## Baseline (3.4.3)
 
 | Fixture | Scenario | Median ms | CPU ms | M rows/s | GC/op |
