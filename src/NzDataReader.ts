@@ -57,6 +57,19 @@ interface GeneratorItem {
     error?: NzDatabaseError;
 }
 
+/**
+ * Synchronous access to the connection's row stream, bypassing the response
+ * generator for rows that are already decoded or not wanted.
+ */
+interface ReaderRowSource {
+    /** Next row already decoded from the read buffer, or `undefined`. Only valid while the generator is suspended after a row. */
+    takeBufferedRow(): unknown[] | undefined;
+    /** Skip the remaining rows by length instead of decoding them (used by `close()`). */
+    discardRows(): void;
+}
+
+const READ_TRUE: Promise<boolean> = Promise.resolve(true);
+
 // Postgres/Netezza OIDs
 const Oid = {
     Bool: 16,
@@ -116,8 +129,8 @@ class NzDataReader<TRow = QueryResultRow> {
     generator: AsyncGenerator<GeneratorItem>;
     columnDescriptions: ColumnDescription[];
     releaseCallback: (() => void) | null;
-    /** Switches the response source to skip unread rows instead of decoding them. */
-    discardRowsCallback: (() => void) | null;
+    /** Fast paths into the connection's row stream; `null` for readers over a plain generator. */
+    rowSource: ReaderRowSource | null;
     /**
      * The current row's column values, typed through the reader's `TRow`.
      * `null` when there is no current row. Prefer the typed getters
@@ -144,14 +157,14 @@ class NzDataReader<TRow = QueryResultRow> {
         columnNullability: boolean[] | null,
         releaseCallback: (() => void) | null,
         initialNextItem: GeneratorItem | null,
-        discardRowsCallback: (() => void) | null = null
+        rowSource: ReaderRowSource | null = null
     ) {
         this.command = command;
         this.generator = generator;
         this.columnDescriptions = [];
         this._columnNullability = null;
         this.releaseCallback = releaseCallback;
-        this.discardRowsCallback = discardRowsCallback;
+        this.rowSource = rowSource;
 
         this._setColumnState(columns, columnNullability);
         this._nextItem = initialNextItem;
@@ -583,7 +596,20 @@ class NzDataReader<TRow = QueryResultRow> {
         return metadata;
     }
 
-    async read(): Promise<boolean> {
+    read(): Promise<boolean> {
+        // Rows already decoded in the connection's batch are served without
+        // resuming the response generator (one resolved promise per row).
+        if (this._nextItem === null && this.rowSource && !this.closed && !this._isFinished) {
+            const row = this.rowSource.takeBufferedRow();
+            if (row !== undefined) {
+                this.currentRow = row as unknown as RowValues<TRow>;
+                return READ_TRUE;
+            }
+        }
+        return this._readFromGenerator();
+    }
+
+    private async _readFromGenerator(): Promise<boolean> {
         if (this.closed || this._isFinished) return false;
         if (this._resultComplete) return false;
         if (this._pendingColumns) return false;
@@ -814,7 +840,7 @@ class NzDataReader<TRow = QueryResultRow> {
             if (!this._isFinished && this.generator) {
                 // The protocol requires reading up to ReadyForQuery, but rows
                 // nobody will read only need to be skipped, not decoded.
-                if (this.discardRowsCallback) this.discardRowsCallback();
+                if (this.rowSource) this.rowSource.discardRows();
                 try {
                     for await (const val of this.generator) {
                         if (val.type === 'NoticeResponse') {
@@ -868,4 +894,4 @@ class NzDataReader<TRow = QueryResultRow> {
     }
 }
 
-export { NzDataReader, type ColumnDescription, type ColumnMetadata, type GeneratorItem };
+export { NzDataReader, type ColumnDescription, type ColumnMetadata, type GeneratorItem, type ReaderRowSource };

@@ -92,3 +92,44 @@ fact200k early close: **−96%** (the C# reference needs ~9-10 ms for the same
 drain). Full reads are unchanged. Golden digests unchanged.
 
 **Decision: ACCEPTED.**
+
+---
+
+## 2. Fewer promises per row
+
+**Problem.** Every row went through `generator.next()` of an async generator
+that itself delegated through `yield*` to a second generator, plus the
+`read()` promise: at least three promise hops per row even when the row was
+already decoded in the in-buffer batch. Text `D` rows additionally awaited four
+reads per row.
+
+**Change.**
+
+- `read()` is no longer `async`: when the connection has already decoded the
+  next row (`_batchRowCache`), it takes it synchronously through a
+  `ReaderRowSource` and returns a shared resolved promise. The generator is
+  resumed only when the batch is exhausted. The generator checks the same batch
+  first when resumed, so a row is never delivered twice.
+- The `_responseGenerator` → `_responseGeneratorCore` `yield*` layer is merged
+  into one generator.
+- Text DataRows get the same in-buffer batch as RowStandard rows
+  (`_tryReadDataRowBatch`).
+- Both batch decoders now stop before a malformed row and leave it to the
+  regular path, so its protocol error is raised by the `read()` that reaches
+  the row, not by `executeReader()` or an earlier `read()` (previously the
+  DBOS batch could throw early). Regression test added.
+- `diagnostics` keeps one fixed object shape (`textDataRowView*` counters were
+  added lazily before).
+
+| Fixture | Scenario | Before ms | After ms |
+| --- | --- | ---: | ---: |
+| dimdate | FullRead_GetValue | 5.36 | 4.01 |
+| dimdate | FullDecode_NoGetValue | 5.14 | 3.29 |
+| fact200k | FullRead_GetValue | 153.97 | 110.53 |
+| fact200k | FullDecode_NoGetValue | 144.61 | 104.66 |
+| fact200k | ForAwait_RowObjects | 190.22 | 141.61 |
+| fact200k | Query_RowObjects | 220.83 | 143.61 |
+
+fact200k full read **−28%**, GC per op roughly halved. Golden digests unchanged.
+
+**Decision: ACCEPTED.**
