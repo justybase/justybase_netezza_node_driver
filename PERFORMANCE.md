@@ -311,3 +311,46 @@ repeated fact200k reads; a 1 MiB buffer is released after a response. Both fail
 on the previous code. Golden digests unchanged.
 
 **Decision: ACCEPTED** (mainly a retained-memory fix).
+
+---
+
+## 8. Text-protocol (`D` row) path
+
+No large text-protocol capture exists, so `bench:replay` adds a synthetic
+`text50k` fixture (`benchmarks/replay/fixtures.js`): the Rust `text_types`
+capture (INT4, NVARCHAR, NUMERIC(10,4), DATE, TIMESTAMP, BOOL, FLOAT8, TIME)
+with its DataRow repeated 50000 times.
+
+**Problem.** Profile before this step: `parseTimestampText` + regex +
+`normalizeTimestampText` ~21%, `parseDateText` ~11% (template string +
+`Date` string parser), `parseTimeString` ~8% (two `split`s), native string
+decoding ~16%. INT8 text built one BigInt per digit, NUMERIC text allocated
+a `{precision, scale}` object per value, and an early `close()` skipped `D`
+rows one generator step at a time.
+
+**Change.**
+
+- Regex- and split-free fast paths for the plain formats Netezza sends:
+  `YYYY-MM-DD`, `YYYY-MM-DD[ T]HH:MM:SS[.f…][±HH[[:]MM]]` and
+  `HH:MM:SS[.ffffff]`. They are taken only where `Date.UTC` provably equals the
+  ISO parser (year ≥ 100, month 1-12, day 1-31 with the same overflow roll,
+  hour ≤ 23, zone ≤ 23:59); anything else goes to the previous general parser.
+- INT8 text up to 15 digits: one `BigInt(number)`.
+- NUMERIC text: the type modifier is decoded once per column.
+- Short values go through `decodeUtf8` (step 6).
+- Early `close()` skips buffered `D` frames in one loop, like `Y` frames.
+- `tests/TextParsing.unit.test.js` compares against the previous
+  implementations on fixed edge cases and 30000 random (often deliberately
+  invalid) timestamps, dates and times plus 20000 INT8 strings. Mutations of the
+  zone sign, the year guard and the fraction truncation are caught.
+
+| text50k | 3.4.3 ms | Before step ms | After ms |
+| --- | ---: | ---: | ---: |
+| FullRead_GetValue | 269.60 | 107.71 | 57.72 |
+| FullDecode_NoGetValue | 163.54 | 86.46 | 54.12 |
+| Read1_Dispose | 143.49 | 27.10 | 3.51 |
+| Query_RowObjects | 156.34 | – | 56.18 |
+
+("Before step" includes steps 1-7, chiefly the text-row batching of step 2.)
+
+**Decision: ACCEPTED.**

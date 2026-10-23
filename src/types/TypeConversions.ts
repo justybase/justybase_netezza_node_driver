@@ -100,6 +100,34 @@ export function timeRecvFloat(data: Buffer, offset: number = 0): TimeValue {
 export function parseTimeString(str: string | null): TimeValue | null {
     if (!str) return null;
     const timeString = str;
+    // Plain `HH:MM:SS[.ffffff]` without splitting; anything else takes the general path.
+    if (timeString.length >= 8 && timeString.charCodeAt(2) === 58 && timeString.charCodeAt(5) === 58) {
+        const hours = readDigits(timeString, 0, 2);
+        const minutes = readDigits(timeString, 3, 2);
+        const seconds = readDigits(timeString, 6, 2);
+        let microseconds = 0;
+        let plain = hours >= 0 && minutes >= 0 && seconds >= 0;
+        if (plain && timeString.length > 8) {
+            const digits = timeString.length - 9;
+            plain = timeString.charCodeAt(8) === 46 && digits >= 1 && digits <= 6;
+            if (plain) {
+                microseconds = readDigits(timeString, 9, digits);
+                plain = microseconds >= 0;
+                for (let i = digits; i < 6; i++) microseconds *= 10;
+            }
+        }
+        if (plain) {
+            return {
+                hours,
+                minutes,
+                seconds,
+                microseconds,
+                toString(): string {
+                    return timeString;
+                },
+            };
+        }
+    }
     const parts = timeString.split(':');
     const hours = parseInt(parts[0], 10) || 0;
     const minutes = parseInt(parts[1], 10) || 0;
@@ -200,6 +228,21 @@ function parseIntFromBuffer(data: Buffer, offset: number, len: number): number {
 }
 
 function parseBigIntFromBuffer(data: Buffer, offset: number, len: number): bigint {
+    // Up to 15 digits fit a double exactly: one BigInt instead of one per digit.
+    if (len <= 16) {
+        let i = offset;
+        const end = offset + len;
+        const neg = i < end && data[i] === 45;
+        if (neg) i++;
+        let num = 0;
+        let digits = 0;
+        for (; i < end; i++, digits++) {
+            const d = data[i] - 48;
+            if (d < 0 || d > 9) break;
+            num = num * 10 + d;
+        }
+        if (i === end && digits <= 15) return BigInt(neg ? -num : num);
+    }
     let val = 0n;
     let neg = false;
     let i = offset;
@@ -272,9 +315,12 @@ function parseNumericTypeModifier(typeMod: number): { precision: number; scale: 
 }
 
 function parseNumericText(value: string, typeMod: number): number | string {
+    return parseNumericTextWithPrecision(value, parseNumericTypeModifier(typeMod).precision);
+}
+
+function parseNumericTextWithPrecision(value: string, precision: number): number | string {
     const trimmed = value.trim();
     const numeric = Number(trimmed);
-    const { precision } = parseNumericTypeModifier(typeMod);
 
     if (!Number.isNaN(numeric) && Number.isFinite(numeric)) {
         if (precision === 0) {
@@ -289,8 +335,89 @@ function parseNumericText(value: string, typeMod: number): number | string {
     return trimmed;
 }
 
+/** Value of `len` ASCII digits at `pos`, or -1 if any is not a digit. */
+function readDigits(text: string, pos: number, len: number): number {
+    let value = 0;
+    for (let i = pos; i < pos + len; i++) {
+        const d = text.charCodeAt(i) - 48;
+        if (d < 0 || d > 9) return -1;
+        value = value * 10 + d;
+    }
+    return value;
+}
+
+/**
+ * Milliseconds of a plain `YYYY-MM-DD` date at `pos`, or NaN when the text is
+ * not in the range where `Date.UTC` provably matches the ISO parser
+ * (years 100+, month 1-12, day 1-31; both roll day overflow forward).
+ */
+function plainDateMs(text: string, pos: number): number {
+    if (text.charCodeAt(pos + 4) !== 45 || text.charCodeAt(pos + 7) !== 45) return Number.NaN;
+    const year = readDigits(text, pos, 4);
+    const month = readDigits(text, pos + 5, 2);
+    const day = readDigits(text, pos + 8, 2);
+    if (year < 100 || month < 1 || month > 12 || day < 1 || day > 31) return Number.NaN;
+    return Date.UTC(year, month - 1, day);
+}
+
 function parseDateText(value: string): Date {
+    if (value.length === 10) {
+        const ms = plainDateMs(value, 0);
+        if (!Number.isNaN(ms)) return new Date(ms);
+    }
     return new Date(`${value.trim()}T00:00:00.000Z`);
+}
+
+/**
+ * `YYYY-MM-DD HH:MM:SS[.f+][+HH[:MM]|-HH[:MM]]` without regex or string
+ * building; NaN sends anything else to the general parser.
+ */
+function plainTimestampMs(text: string): number {
+    const length = text.length;
+    if (length < 19) return Number.NaN;
+    const sep = text.charCodeAt(10);
+    if ((sep !== 32 && sep !== 84) || text.charCodeAt(13) !== 58 || text.charCodeAt(16) !== 58) return Number.NaN;
+    const dateMs = plainDateMs(text, 0);
+    const hours = readDigits(text, 11, 2);
+    const minutes = readDigits(text, 14, 2);
+    const seconds = readDigits(text, 17, 2);
+    if (Number.isNaN(dateMs) || hours < 0 || hours > 23 || minutes < 0 || minutes > 59 || seconds < 0 || seconds > 59) {
+        return Number.NaN;
+    }
+    let pos = 19;
+    let millis = 0;
+    if (pos < length && text.charCodeAt(pos) === 46) {
+        pos++;
+        const fractionStart = pos;
+        while (pos < length) {
+            const d = text.charCodeAt(pos) - 48;
+            if (d < 0 || d > 9) break;
+            // Truncated to milliseconds, like the general parser.
+            if (pos - fractionStart < 3) millis = millis * 10 + d;
+            pos++;
+        }
+        if (pos === fractionStart) return Number.NaN;
+        for (let i = Math.min(pos - fractionStart, 3); i < 3; i++) millis *= 10;
+    }
+    let zoneMs = 0;
+    if (pos < length) {
+        const sign = text.charCodeAt(pos);
+        if (sign !== 43 && sign !== 45) return Number.NaN;
+        const zoneHours = readDigits(text, pos + 1, 2);
+        let zoneMinutes = 0;
+        if (pos + 3 === length) {
+            pos += 3;
+        } else {
+            const minutesAt = text.charCodeAt(pos + 3) === 58 ? pos + 4 : pos + 3;
+            zoneMinutes = readDigits(text, minutesAt, 2);
+            pos = minutesAt + 2;
+        }
+        if (pos !== length || zoneHours < 0 || zoneHours > 23 || zoneMinutes < 0 || zoneMinutes > 59) {
+            return Number.NaN;
+        }
+        zoneMs = (zoneHours * 60 + zoneMinutes) * 60_000 * (sign === 43 ? 1 : -1);
+    }
+    return dateMs + ((hours * 60 + minutes) * 60 + seconds) * 1000 + millis - zoneMs;
 }
 
 function normalizeTimestampText(value: string): string | null {
@@ -314,6 +441,8 @@ function normalizeTimestampText(value: string): string | null {
 }
 
 function parseTimestampText(value: string): Date {
+    const ms = plainTimestampMs(value);
+    if (!Number.isNaN(ms)) return new Date(ms);
     const normalized = normalizeTimestampText(value);
     if (normalized) {
         return new Date(normalized);
@@ -348,8 +477,10 @@ export function createTextValueParser(typeOid: number, typeMod: number = -1): Te
         case 1186:
         case 1266:
             return passthroughText;
-        case 1700:
-            return (value: string) => parseNumericText(value, typeMod);
+        case 1700: {
+            const { precision } = parseNumericTypeModifier(typeMod);
+            return (value: string) => parseNumericTextWithPrecision(value, precision);
+        }
         default:
             return passthroughText;
     }

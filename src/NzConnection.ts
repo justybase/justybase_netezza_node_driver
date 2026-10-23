@@ -840,6 +840,22 @@ class NzConnection extends EventEmitter {
         return row;
     }
 
+    /** Text-protocol counterpart of `_discardBufferedDbosRows` (`'D'` + shared header + length + payload). */
+    private _discardBufferedDataRows(): number {
+        let rows = 0;
+        while (
+            this._intBufEnd - this._intBufStart >= 9 &&
+            this._intBuf[this._intBufStart] === BackendMessageCode.DataRow
+        ) {
+            const len = validateProtocolLength(this._intBuf.readInt32BE(this._intBufStart + 5), 'dataRowPayload');
+            const frameEnd = this._intBufStart + 9 + len;
+            if (frameEnd > this._intBufEnd) break;
+            this._intBufStart = frameEnd;
+            rows++;
+        }
+        return rows;
+    }
+
     /**
      * Skips every complete RowStandard frame already buffered, so a drain does
      * not go back through the generator for each row. Returns the row count.
@@ -1779,7 +1795,7 @@ class NzConnection extends EventEmitter {
                     const len = validateProtocolLength(await this._readInt32(), 'dataRowPayload');
                     if (this._discardRows) {
                         await this._discardBytes(len);
-                        this._diag.discardedRows++;
+                        this._diag.discardedRows += 1 + this._discardBufferedDataRows();
                         continue;
                     }
                     this._diag.textParseDataRowCalls++;
@@ -1934,7 +1950,7 @@ class NzConnection extends EventEmitter {
             } else {
                 this._diag.textParseSlowPath++;
                 const colDesc = (this._rowDescription as ColumnInfo[])[columnNumber];
-                const value = data.toString('utf8', dataIdx, dataIdx + actualLen);
+                const value = decodeUtf8(data, dataIdx, dataIdx + actualLen);
                 const parser = this._textColumnParsers?.[columnNumber];
                 row[columnNumber] = parser
                     ? parser(value)

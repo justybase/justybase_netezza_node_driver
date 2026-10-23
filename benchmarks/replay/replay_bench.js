@@ -15,7 +15,7 @@ const { PerformanceObserver, performance } = require('perf_hooks');
 
 const driverEntry = process.env.NZ_NODE_DRIVER_ENTRY || path.join(__dirname, '..', '..', 'dist', 'cjs');
 const { NzConnection } = require(driverEntry);
-const { loadFixture } = require('../../tests/helpers/replay/NzReplayFixture');
+const { loadBenchFixture } = require('./fixtures');
 
 function parseArgs(argv) {
     const args = { samples: 10, warmup: 3, json: null, fixture: [], scenario: [] };
@@ -141,12 +141,12 @@ async function measure(connection, sql, scenario, args) {
 
 async function main() {
     const args = parseArgs(process.argv.slice(2));
-    const fixtures = args.fixture.length ? args.fixture : ['dimdate', 'fact200k'];
+    const fixtures = args.fixture.length ? args.fixture : ['dimdate', 'fact200k', 'text50k'];
     const scenarioNames = args.scenario.length ? args.scenario : Object.keys(SCENARIOS);
     const results = [];
 
     for (const fixtureName of fixtures) {
-        const { query } = loadFixture(fixtureName);
+        const { query } = loadBenchFixture(fixtureName);
         const { child, port } = await startServer(fixtureName);
         const connection = new NzConnection({
             host: '127.0.0.1',
