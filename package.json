@@ -49,7 +49,8 @@
     "test:coverage:unit:run": "jest --runInBand --config jest.config.js --coverage --testPathPatterns=\"(\\.unit\\.|TypeConversions|StackOverflowPrevention)\"",
     "test:debug": "npm run build && npm run test:debug:run",
     "test:debug:run": "cross-env DEBUG=nz:* jest --runInBand --config jest.config.js",
-    "prepublishOnly": "npm run clean && npm run build"
+    "prepublishOnly": "npm run clean && npm run build",
+    "bench:replay": "node --expose-gc benchmarks/replay/replay_bench.js"
   },
   "repository": {
     "type": "git",

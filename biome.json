@@ -6,7 +6,7 @@
         "useIgnoreFile": true
     },
     "files": {
-        "includes": ["src/**", "tests/**", "tools/**", "scripts/**"]
+        "includes": ["src/**", "tests/**", "tools/**", "scripts/**", "benchmarks/**"]
     },
     "formatter": {
         "enabled": false
