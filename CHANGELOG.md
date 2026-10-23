@@ -27,6 +27,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   error from an earlier `read()` (or from `executeReader()`) instead of the
   `read()` that reaches it.
 
+- Binary VARCHAR/NVARCHAR values of 32766 characters or more were returned as
+  an empty string: the 2-byte length prefix was read as signed.
+- Binary TIMESTAMP values before 2000-01-01 with a sub-millisecond part were
+  rounded toward 2000 instead of down (`1999-12-31 23:59:59.999999` became
+  `2000-01-01 00:00:00.000`).
+
 ### Added
 - Offline replay tests and benchmark: `tests/Replay.unit.test.js`,
   `npm run bench:replay` (fixtures shared with the C# and Rust drivers).

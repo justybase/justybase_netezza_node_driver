@@ -11,7 +11,7 @@ exports[`replay: Rust wire fixtures dbos_types 1`] = `
   "> SELECT I, V, N, D, TS, B, F, T, BI, SI, BY FROM RUST_WIRE_T ORDER BY I",
   "columns I:INT4,V:NVARCHAR,N:NUMERIC,D:DATE,TS:TIMESTAMPTZ,B:BOOL,F:FLOAT8,T:TIME,BI:INT8,SI:INT2,BY:BYTEINT",
   "row number:-2147483648 | string:Zażółć gęślą jaźń | string:3.1400 | date:1709164800000 | date:1709210096123 | boolean:true | number:1.5 | object:{"hours":12,"minutes":34,"seconds":56,"microseconds":0}:12:34:56 | bigint:-9223372036854775807 | number:-32768 | number:-128",
-  "row number:2147483647 | string: | number:-0.0001 | date:-62135596800000 | date:946684800000 | boolean:false | number:-2.5 | object:{"hours":0,"minutes":0,"seconds":0,"microseconds":0}:00:00:00 | bigint:9223372036854775807 | number:32767 | number:127",
+  "row number:2147483647 | string: | number:-0.0001 | date:-62135596800000 | date:946684799999 | boolean:false | number:-2.5 | object:{"hours":0,"minutes":0,"seconds":0,"microseconds":0}:00:00:00 | bigint:9223372036854775807 | number:32767 | number:127",
 ]
 `;
 
@@ -193,8 +193,8 @@ exports[`replay: Rust wire fixtures varchar_32767 1`] = `
   "row string:Axxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx…(32775)…xxxxxxxxxxxxxxxxxxxZ",
   "> SELECT ID, V FROM RUST_WIRE_VC ORDER BY ID",
   "columns ID:INT4,V:VARCHAR",
-  "row number:32766 | string:",
-  "row number:32767 | string:",
-  "row number:32768 | string:",
+  "row number:32766 | string:Axxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx…(32773)…xxxxxxxxxxxxxxxxxxxZ",
+  "row number:32767 | string:Axxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx…(32774)…xxxxxxxxxxxxxxxxxxxZ",
+  "row number:32768 | string:Axxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx…(32775)…xxxxxxxxxxxxxxxxxxxZ",
 ]
 `;

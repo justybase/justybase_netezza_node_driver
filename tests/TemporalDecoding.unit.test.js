@@ -1,11 +1,15 @@
 /**
- * Binary TIMESTAMP/TIME decoding must match the previous BigInt-based
- * implementation (kept below as the reference) over the whole int64 range.
+ * Binary TIMESTAMP/TIME decoding must match an exact BigInt reference over
+ * the whole int64 range (TIMESTAMP rounds microseconds down to milliseconds).
  */
 const { toDateTimeFrom8Bytes, timeRecvFloat, POSTGRES_EPOCH_MS } = require('../dist/cjs/types/TypeConversions');
 
+/** Exact floor(micros / 1000) with BigInt (BigInt division truncates toward zero). */
 function referenceTimestamp(data, offset) {
-    return new Date(POSTGRES_EPOCH_MS + Number(data.readBigInt64LE(offset) / 1000n));
+    const micros = data.readBigInt64LE(offset);
+    let ms = micros / 1000n;
+    if (micros < 0n && ms * 1000n !== micros) ms -= 1n;
+    return new Date(POSTGRES_EPOCH_MS + Number(ms));
 }
 
 function referenceTime(data, offset) {
@@ -74,7 +78,7 @@ function plainTime(value) {
 describe('binary temporal decoding', () => {
     const values = [...EDGES, ...Array.from({ length: 20000 }, randomMicros)];
 
-    test('TIMESTAMP matches the BigInt reference, including truncation toward zero', () => {
+    test('TIMESTAMP matches the BigInt reference, flooring to milliseconds', () => {
         for (const micros of values) {
             const data = encode(micros, 2);
             const actual = toDateTimeFrom8Bytes(data, 2).getTime();
@@ -94,6 +98,13 @@ describe('binary temporal decoding', () => {
                 }
             }
         }
+    });
+
+    test('TIMESTAMP before 2000 keeps a sub-millisecond instant in its own millisecond', () => {
+        expect(toDateTimeFrom8Bytes(encode(-1n)).toISOString()).toBe('1999-12-31T23:59:59.999Z');
+        expect(toDateTimeFrom8Bytes(encode(-1000n)).toISOString()).toBe('1999-12-31T23:59:59.999Z');
+        expect(toDateTimeFrom8Bytes(encode(-1001n)).toISOString()).toBe('1999-12-31T23:59:59.998Z');
+        expect(toDateTimeFrom8Bytes(encode(999n)).toISOString()).toBe('2000-01-01T00:00:00.000Z');
     });
 
     test('TIME keeps its string form and plain-object shape', () => {

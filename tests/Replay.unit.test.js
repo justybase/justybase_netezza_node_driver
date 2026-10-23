@@ -188,6 +188,23 @@ describe('replay: Rust wire fixtures', () => {
         });
     });
 
+    test('binary VARCHAR values of 32 KiB and more decode in full', async () => {
+        const fixture = loadWireFixture('varchar_32767');
+        await withReplay(fixture, {}, async (connection) => {
+            const expected = (length) => `A${'x'.repeat(length - 2)}Z`;
+            const lengths = [32766, 32767, 32768];
+            const results = [];
+            for (const sql of fixture.statements) {
+                const reader = await connection.createCommand(sql).executeReader();
+                while (await reader.read()) results.push(reader.getValues());
+                await reader.close();
+            }
+            // Text protocol (SELECT CAST(...)) and the binary table read must agree.
+            expect(results.slice(0, 3).map(([value]) => value)).toEqual(lengths.map(expected));
+            expect(results.slice(3)).toEqual(lengths.map((length) => [length, expected(length)]));
+        });
+    });
+
     test.each([1, 3])('numeric_matrix is identical with %i-byte chunks', async (chunkSize) => {
         const fixture = loadWireFixture('numeric_matrix');
         const run = async (options) => {
