@@ -51,12 +51,16 @@ const TRANSACTION_END_KEYWORD = /^(?:commit|rollback|end|abort)\b/i;
 function splitStatements(sql: string): string[] {
     const statements: string[] = [];
     let current = '';
+    // Plain SQL is copied in runs (`sql.slice(runStart, i)`) rather than one
+    // character at a time; blanked regions become a single space.
+    let runStart = 0;
     let i = 0;
 
     while (i < sql.length) {
         const ch = sql[i];
 
         if (ch === "'" || ch === '"') {
+            current += `${sql.slice(runStart, i)} `;
             const quote = ch;
             i++;
             while (i < sql.length) {
@@ -75,7 +79,7 @@ function splitStatements(sql: string): string[] {
                 i++;
                 break;
             }
-            current += ' ';
+            runStart = i;
             continue;
         }
 
@@ -90,10 +94,11 @@ function splitStatements(sql: string): string[] {
             !/[A-Za-z0-9_$]/.test(i > 0 ? sql[i - 1] : ' ') &&
             /^begin_proc\b/i.test(sql.slice(i))
         ) {
+            current += `${sql.slice(runStart, i)} `;
             const body = sql.slice(i);
             const endProc = /\bend_proc\b/i.exec(body);
             i += endProc ? endProc.index + endProc[0].length : body.length;
-            current += ' ';
+            runStart = i;
             continue;
         }
 
@@ -102,39 +107,42 @@ function splitStatements(sql: string): string[] {
         if (ch === '$') {
             const tag = sql.slice(i).match(/^\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$/)?.[0];
             if (tag !== undefined) {
+                current += `${sql.slice(runStart, i)} `;
                 const end = sql.indexOf(tag, i + tag.length);
                 i = end === -1 ? sql.length : end + tag.length;
-                current += ' ';
+                runStart = i;
                 continue;
             }
         }
 
         if (ch === '-' && sql[i + 1] === '-') {
+            current += `${sql.slice(runStart, i)} `;
             const lineEnd = sql.indexOf('\n', i);
             i = lineEnd === -1 ? sql.length : lineEnd;
-            current += ' ';
+            runStart = i;
             continue;
         }
 
         if (ch === '/' && sql[i + 1] === '*') {
+            current += `${sql.slice(runStart, i)} `;
             const commentEnd = sql.indexOf('*/', i + 2);
             i = commentEnd === -1 ? sql.length : commentEnd + 2;
-            current += ' ';
+            runStart = i;
             continue;
         }
 
         if (ch === ';') {
-            statements.push(current);
+            statements.push(current + sql.slice(runStart, i));
             current = '';
             i++;
+            runStart = i;
             continue;
         }
 
-        current += ch;
         i++;
     }
 
-    statements.push(current);
+    statements.push(current + sql.slice(runStart, i));
     return statements;
 }
 
