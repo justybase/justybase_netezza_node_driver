@@ -483,7 +483,7 @@ export function getCsNumeric(
     const partCount = digitCount > 0 ? digitCount : prec <= 9 ? 1 : prec <= 18 ? 2 : 4;
 
     const unscaled = readSafeUnscaled(data, partCount, offset);
-    if (unscaled === unscaled) {
+    if (!Number.isNaN(unscaled)) {
         const abs = unscaled < 0 ? -unscaled : unscaled;
         if (prec <= 15 && abs < 1e15) {
             // At most 15 significant digits: the division is correctly rounded,
