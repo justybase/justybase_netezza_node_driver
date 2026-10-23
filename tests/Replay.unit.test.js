@@ -126,11 +126,15 @@ describe('replay: C# .nzreplay fixtures', () => {
 
     test.each([1, 10])('connection is reusable after closing a reader after %i row(s)', async (rowsToRead) => {
         const fixture = loadFixture('dimdate');
-        await withReplay(fixture, {}, async (connection) => {
+        await withReplay(fixture, { chunkSize: 4096 }, async (connection) => {
             const reader = await connection.createCommand(fixture.query).executeReader();
             for (let i = 0; i < rowsToRead; i++) expect(await reader.read()).toBe(true);
             expect(reader.getValue(0)).toBe(20050101 + rowsToRead - 1);
             await reader.close();
+            // Unread rows are skipped by length, not decoded (rows already
+            // decoded into the in-buffer batch are dropped, not counted).
+            expect(connection.diagnostics.discardedRows).toBeGreaterThan(0);
+            expect(connection.diagnostics.parseDbosRowCalls).toBeLessThan(fixture.expectedRows);
 
             const result = await digestAll(connection, fixture.query);
             expect(result.digest).toBe(GOLDEN.dimdate);
