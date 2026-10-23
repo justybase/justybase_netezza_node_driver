@@ -1,0 +1,200 @@
+// Jest Snapshot v1, https://jestjs.io/docs/snapshot-testing
+
+exports[`replay: Rust wire fixtures dbos_types 1`] = `
+[
+  "> CREATE TEMP TABLE RUST_WIRE_T (I INTEGER, V NVARCHAR(40), N NUMERIC(10,4), D DATE, TS TIMESTAMP, B BOOLEAN, F DOUBLE PRE…",
+  "columns ",
+  "> INSERT INTO RUST_WIRE_T VALUES (-2147483648, 'Zażółć gęślą jaźń', 3.1400, '2024-02-29', '2024-02-29 12:34:56.123456', TR…",
+  "columns ",
+  "> INSERT INTO RUST_WIRE_T VALUES (2147483647, '', -0.0001, '0001-01-01', '1999-12-31 23:59:59.999999', FALSE, -2.5, '00:00…",
+  "columns ",
+  "> SELECT I, V, N, D, TS, B, F, T, BI, SI, BY FROM RUST_WIRE_T ORDER BY I",
+  "columns I:INT4,V:NVARCHAR,N:NUMERIC,D:DATE,TS:TIMESTAMPTZ,B:BOOL,F:FLOAT8,T:TIME,BI:INT8,SI:INT2,BY:BYTEINT",
+  "row number:-2147483648 | string:Zażółć gęślą jaźń | string:3.1400 | date:1709164800000 | date:1709210096123 | boolean:true | number:1.5 | object:{"hours":12,"minutes":34,"seconds":56,"microseconds":0}:12:34:56 | bigint:-9223372036854775807 | number:-32768 | number:-128",
+  "row number:2147483647 | string: | number:-0.0001 | date:-62135596800000 | date:946684800000 | boolean:false | number:-2.5 | object:{"hours":0,"minutes":0,"seconds":0,"microseconds":0}:00:00:00 | bigint:9223372036854775807 | number:32767 | number:127",
+]
+`;
+
+exports[`replay: Rust wire fixtures error 1`] = `
+[
+  "> SELECT FROM FROM",
+  "error ERROR:  'SELECT FROM FROM'
+error           ^ found "FROM" (at char 8) expecting an identifier found a keyword",
+  "> SELECT 1/0",
+  "error ERROR:  Divide by 0",
+  "> SELECT 1 AS AFTER_ERROR",
+  "columns AFTER_ERROR:INT4",
+  "row number:1",
+]
+`;
+
+exports[`replay: Rust wire fixtures multi_result 1`] = `
+[
+  "> SELECT 1 AS A; SELECT 'x' AS B, 2 AS C; SELECT CAST(NULL AS INTEGER) AS D",
+  "columns A:INT4",
+  "row number:1",
+  "columns B:VARCHAR,C:INT4",
+  "row string:x | number:2",
+  "columns D:INT4",
+  "row null",
+]
+`;
+
+exports[`replay: Rust wire fixtures notice 1`] = `
+[
+  "> ROLLBACK",
+  "columns ",
+  "> COMMIT",
+  "columns ",
+  "> CREATE TEMP TABLE RUST_WIRE_NT (A INTEGER)",
+  "columns ",
+  "> SELECT 1 AS AFTER_NOTICE",
+  "columns AFTER_NOTICE:INT4",
+  "row number:1",
+]
+`;
+
+exports[`replay: Rust wire fixtures null_matrix 1`] = `
+[
+  "> SELECT CAST(NULL AS INTEGER) AS C0, CAST(1 AS INTEGER) AS C1, CAST(NULL AS VARCHAR(8)) AS C2, CAST(3 AS INTEGER) AS C3, …",
+  "columns C0:INT4,C1:INT4,C2:VARCHAR,C3:INT4,C4:INT4,C5:VARCHAR,C6:INT4,C7:INT4,C8:VARCHAR,C9:INT4,C10:INT4,C11:VARCHAR,C12:INT4,C13:INT4,C14:VARCHAR,C15:INT4,C16:INT4,C17:VARCHAR,C18:INT4,C19:INT4,C20:VARCHAR,C21:INT4,C22:INT4,C23:VARCHAR,C24:INT4,C25:INT4,C26:VARCHAR,C27:INT4,C28:INT4,C29:VARCHAR,C30:INT4,C31:INT4,C32:VARCHAR",
+  "row null | number:1 | null | number:3 | null | string:v5 | null | number:7 | null | number:9 | null | string:v11 | null | number:13 | null | number:15 | null | string:v17 | null | number:19 | null | number:21 | null | string:v23 | null | number:25 | null | number:27 | null | string:v29 | null | number:31 | null",
+  "> CREATE TEMP TABLE RUST_WIRE_N (C0 INTEGER, C1 INTEGER, C2 VARCHAR(8), C3 INTEGER, C4 INTEGER, C5 VARCHAR(8), C6 INTEGER,…",
+  "columns ",
+  "> INSERT INTO RUST_WIRE_N VALUES (NULL, 1, NULL, 3, NULL, 'v5', NULL, 7, NULL, 9, NULL, 'v11', NULL, 13, NULL, 15, NULL, '…",
+  "columns ",
+  "> SELECT * FROM RUST_WIRE_N",
+  "columns C0:INT4,C1:INT4,C2:VARCHAR,C3:INT4,C4:INT4,C5:VARCHAR,C6:INT4,C7:INT4,C8:VARCHAR,C9:INT4,C10:INT4,C11:VARCHAR,C12:INT4,C13:INT4,C14:VARCHAR,C15:INT4,C16:INT4,C17:VARCHAR,C18:INT4,C19:INT4,C20:VARCHAR,C21:INT4,C22:INT4,C23:VARCHAR,C24:INT4,C25:INT4,C26:VARCHAR,C27:INT4,C28:INT4,C29:VARCHAR,C30:INT4,C31:INT4,C32:VARCHAR",
+  "row null | number:1 | null | number:3 | null | string:v5 | null | number:7 | null | number:9 | null | string:v11 | null | number:13 | null | number:15 | null | string:v17 | null | number:19 | null | number:21 | null | string:v23 | null | number:25 | null | number:27 | null | string:v29 | null | number:31 | null",
+]
+`;
+
+exports[`replay: Rust wire fixtures numeric_matrix 1`] = `
+[
+  "> CREATE TEMP TABLE RUST_WIRE_NUM0 (ID INTEGER, V NUMERIC(1,0)) DISTRIBUTE ON RANDOM",
+  "columns ",
+  "> INSERT INTO RUST_WIRE_NUM0 VALUES (0, CAST('0' AS NUMERIC(1,0)))",
+  "columns ",
+  "> INSERT INTO RUST_WIRE_NUM0 VALUES (1, CAST('9' AS NUMERIC(1,0)))",
+  "columns ",
+  "> INSERT INTO RUST_WIRE_NUM0 VALUES (2, CAST('-9' AS NUMERIC(1,0)))",
+  "columns ",
+  "> SELECT V FROM RUST_WIRE_NUM0 ORDER BY ID",
+  "columns V:NUMERIC",
+  "row number:0",
+  "row number:9",
+  "row number:-9",
+  "> SELECT CAST('0' AS NUMERIC(1,0)), CAST('9' AS NUMERIC(1,0)), CAST('-9' AS NUMERIC(1,0))",
+  "columns ?COLUMN?:NUMERIC,?COLUMN?:NUMERIC,?COLUMN?:NUMERIC",
+  "row number:0 | number:9 | number:-9",
+  "> CREATE TEMP TABLE RUST_WIRE_NUM1 (ID INTEGER, V NUMERIC(18,0)) DISTRIBUTE ON RANDOM",
+  "columns ",
+  "> INSERT INTO RUST_WIRE_NUM1 VALUES (0, CAST('0' AS NUMERIC(18,0)))",
+  "columns ",
+  "> INSERT INTO RUST_WIRE_NUM1 VALUES (1, CAST('999999999999999999' AS NUMERIC(18,0)))",
+  "columns ",
+  "> INSERT INTO RUST_WIRE_NUM1 VALUES (2, CAST('-999999999999999999' AS NUMERIC(18,0)))",
+  "columns ",
+  "> SELECT V FROM RUST_WIRE_NUM1 ORDER BY ID",
+  "columns V:NUMERIC",
+  "row string:0",
+  "row string:999999999999999999",
+  "row string:-999999999999999999",
+  "> SELECT CAST('0' AS NUMERIC(18,0)), CAST('999999999999999999' AS NUMERIC(18,0)), CAST('-999999999999999999' AS NUMERIC(18…",
+  "columns ?COLUMN?:NUMERIC,?COLUMN?:NUMERIC,?COLUMN?:NUMERIC",
+  "row string:0 | string:999999999999999999 | string:-999999999999999999",
+  "> CREATE TEMP TABLE RUST_WIRE_NUM2 (ID INTEGER, V NUMERIC(38,0)) DISTRIBUTE ON RANDOM",
+  "columns ",
+  "> INSERT INTO RUST_WIRE_NUM2 VALUES (0, CAST('0' AS NUMERIC(38,0)))",
+  "columns ",
+  "> INSERT INTO RUST_WIRE_NUM2 VALUES (1, CAST('99999999999999999999999999999999999999' AS NUMERIC(38,0)))",
+  "columns ",
+  "> SELECT V FROM RUST_WIRE_NUM2 ORDER BY ID",
+  "columns V:NUMERIC",
+  "row string:0",
+  "row string:99999999999999999999999999999999999999",
+  "> SELECT CAST('0' AS NUMERIC(38,0)), CAST('99999999999999999999999999999999999999' AS NUMERIC(38,0))",
+  "columns ?COLUMN?:NUMERIC,?COLUMN?:NUMERIC",
+  "row string:0 | string:99999999999999999999999999999999999999",
+  "> CREATE TEMP TABLE RUST_WIRE_NUM3 (ID INTEGER, V NUMERIC(10,4)) DISTRIBUTE ON RANDOM",
+  "columns ",
+  "> INSERT INTO RUST_WIRE_NUM3 VALUES (0, CAST('0' AS NUMERIC(10,4)))",
+  "columns ",
+  "> INSERT INTO RUST_WIRE_NUM3 VALUES (1, CAST('3.1400' AS NUMERIC(10,4)))",
+  "columns ",
+  "> INSERT INTO RUST_WIRE_NUM3 VALUES (2, CAST('-0.0001' AS NUMERIC(10,4)))",
+  "columns ",
+  "> INSERT INTO RUST_WIRE_NUM3 VALUES (3, CAST('999999.9999' AS NUMERIC(10,4)))",
+  "columns ",
+  "> SELECT V FROM RUST_WIRE_NUM3 ORDER BY ID",
+  "columns V:NUMERIC",
+  "row string:0.0000",
+  "row string:3.1400",
+  "row number:-0.0001",
+  "row number:999999.9999",
+  "> SELECT CAST('0' AS NUMERIC(10,4)), CAST('3.1400' AS NUMERIC(10,4)), CAST('-0.0001' AS NUMERIC(10,4)), CAST('999999.9999'…",
+  "columns ?COLUMN?:NUMERIC,?COLUMN?:NUMERIC,?COLUMN?:NUMERIC,?COLUMN?:NUMERIC",
+  "row string:0.0000 | string:3.1400 | number:-0.0001 | number:999999.9999",
+  "> CREATE TEMP TABLE RUST_WIRE_NUM4 (ID INTEGER, V NUMERIC(38,10)) DISTRIBUTE ON RANDOM",
+  "columns ",
+  "> INSERT INTO RUST_WIRE_NUM4 VALUES (0, CAST('1.0000000001' AS NUMERIC(38,10)))",
+  "columns ",
+  "> INSERT INTO RUST_WIRE_NUM4 VALUES (1, CAST('-12345678901234567890123456.7890123456' AS NUMERIC(38,10)))",
+  "columns ",
+  "> SELECT V FROM RUST_WIRE_NUM4 ORDER BY ID",
+  "columns V:NUMERIC",
+  "row string:1.0000000001",
+  "row string:-12345678901234567890123456.7890123456",
+  "> SELECT CAST('1.0000000001' AS NUMERIC(38,10)), CAST('-12345678901234567890123456.7890123456' AS NUMERIC(38,10))",
+  "columns ?COLUMN?:NUMERIC,?COLUMN?:NUMERIC",
+  "row string:1.0000000001 | string:-12345678901234567890123456.7890123456",
+  "> CREATE TEMP TABLE RUST_WIRE_NUM5 (ID INTEGER, V NUMERIC(38,38)) DISTRIBUTE ON RANDOM",
+  "columns ",
+  "> INSERT INTO RUST_WIRE_NUM5 VALUES (0, CAST('0.99999999999999999999999999999999999999' AS NUMERIC(38,38)))",
+  "columns ",
+  "> INSERT INTO RUST_WIRE_NUM5 VALUES (1, CAST('-0.5' AS NUMERIC(38,38)))",
+  "columns ",
+  "> SELECT V FROM RUST_WIRE_NUM5 ORDER BY ID",
+  "columns V:NUMERIC",
+  "row string:0.99999999999999999999999999999999999999",
+  "row string:-0.50000000000000000000000000000000000000",
+  "> SELECT CAST('0.99999999999999999999999999999999999999' AS NUMERIC(38,38)), CAST('-0.5' AS NUMERIC(38,38))",
+  "columns ?COLUMN?:NUMERIC,?COLUMN?:NUMERIC",
+  "row string:0.99999999999999999999999999999999999999 | string:-0.50000000000000000000000000000000000000",
+]
+`;
+
+exports[`replay: Rust wire fixtures text_types 1`] = `
+[
+  "> SELECT CAST(-2147483648 AS INTEGER) AS I, CAST('Zażółć gęślą jaźń' AS NVARCHAR(40)) AS V, CAST('3.1400' AS NUMERIC(10,4)…",
+  "columns I:INT4,V:NVARCHAR,N:NUMERIC,D:DATE,TS:TIMESTAMPTZ,B:BOOL,F:FLOAT8,T:TIME",
+  "row number:-2147483648 | string:Zażółć gęślą jaźń | string:3.1400 | date:1709164800000 | date:1709210096123 | boolean:true | number:1.5 | object:{"hours":12,"minutes":34,"seconds":56,"microseconds":0}:12:34:56",
+]
+`;
+
+exports[`replay: Rust wire fixtures varchar_32767 1`] = `
+[
+  "> CREATE TEMP TABLE RUST_WIRE_VC (ID INTEGER, V VARCHAR(64000)) DISTRIBUTE ON RANDOM",
+  "columns ",
+  "> INSERT INTO RUST_WIRE_VC VALUES (32766, 'A' || REPEAT('x', 32764) || 'Z')",
+  "columns ",
+  "> SELECT CAST('A' || REPEAT('x', 32764) || 'Z' AS VARCHAR(64000))",
+  "columns ?COLUMN?:VARCHAR",
+  "row string:Axxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx…(32773)…xxxxxxxxxxxxxxxxxxxZ",
+  "> INSERT INTO RUST_WIRE_VC VALUES (32767, 'A' || REPEAT('x', 32765) || 'Z')",
+  "columns ",
+  "> SELECT CAST('A' || REPEAT('x', 32765) || 'Z' AS VARCHAR(64000))",
+  "columns ?COLUMN?:VARCHAR",
+  "row string:Axxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx…(32774)…xxxxxxxxxxxxxxxxxxxZ",
+  "> INSERT INTO RUST_WIRE_VC VALUES (32768, 'A' || REPEAT('x', 32766) || 'Z')",
+  "columns ",
+  "> SELECT CAST('A' || REPEAT('x', 32766) || 'Z' AS VARCHAR(64000))",
+  "columns ?COLUMN?:VARCHAR",
+  "row string:Axxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx…(32775)…xxxxxxxxxxxxxxxxxxxZ",
+  "> SELECT ID, V FROM RUST_WIRE_VC ORDER BY ID",
+  "columns ID:INT4,V:VARCHAR",
+  "row number:32766 | string:",
+  "row number:32767 | string:",
+  "row number:32768 | string:",
+]
+`;
