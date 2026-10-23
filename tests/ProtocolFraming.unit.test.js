@@ -240,6 +240,31 @@ describe('Netezza protocol framing', () => {
         await expect(collectResponse(connection)).rejects.toThrow(/fixed field 0 extends beyond the row/);
     });
 
+    test('a malformed buffered RowStandard row fails the read that reaches it, not an earlier one', async () => {
+        const { connection, socket } = createConnection(Buffer.alloc(0));
+        socket.onWrite = () => {
+            socket.chunks.push(
+                Buffer.concat([
+                    payloadMessage(BackendMessageCode.RowDescription, rowDescription()),
+                    payloadMessage(BackendMessageCode.RowDescriptionStandard, binaryDescriptor()),
+                    rowStandardMessage(binaryRow(1)),
+                    rowStandardMessage(binaryRow(2)),
+                    rowStandardMessage(Buffer.alloc(3)),
+                ])
+            );
+            socket.emit('readable');
+        };
+
+        const reader = await connection.createCommand('SELECT 1').executeReader();
+        await expect(reader.read()).resolves.toBe(true);
+        expect(reader.getValue(0)).toBe(1);
+        await expect(reader.read()).resolves.toBe(true);
+        expect(reader.getValue(0)).toBe(2);
+        await expect(reader.read()).rejects.toThrow(/extends beyond the row/);
+        expect(connection._protocolFaulted).toBe(true);
+        await reader.close();
+    });
+
     test.each([
         ['negative', -1],
         ['oversized', 10_000_001],

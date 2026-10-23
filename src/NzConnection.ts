@@ -6,7 +6,7 @@ import { EventEmitter } from 'node:events';
 import { Handshake } from './Handshake';
 import { PGUtil } from './utils/PGUtil';
 import { NzCommand } from './NzCommand';
-import { NzDataReader, type GeneratorItem, type ColumnDescription } from './NzDataReader';
+import { NzDataReader, type GeneratorItem, type ColumnDescription, type ReaderRowSource } from './NzDataReader';
 import { DbosTupleDesc } from './DbosTupleDesc';
 import { BackendMessageCode, NzType } from './protocol/constants';
 import { buildSimpleQueryPacket } from './protocol/QueryExecutor';
@@ -262,13 +262,17 @@ class NzConnection extends EventEmitter {
     private _varOffsetsScratch: number[] = [];
 
     // Diagnostics counters
-    private _diag: Record<string, number> = {};
+    private _diag: Record<string, number> = NzConnection._emptyDiag();
     /** Read-only view of internal protocol/performance counters */
     get diagnostics(): Readonly<Record<string, number>> {
         return this._diag;
     }
     private _resetDiag(): void {
-        this._diag = {
+        this._diag = NzConnection._emptyDiag();
+    }
+    // One fixed shape, so hot-path counter updates keep a stable hidden class.
+    private static _emptyDiag(): Record<string, number> {
+        return {
             readBytesCalls: 0,
             readBytesBytes: 0,
             readBytesSlowCalls: 0,
@@ -290,6 +294,8 @@ class NzConnection extends EventEmitter {
             textParseDataRowCalls: 0,
             textParseSlowPath: 0,
             textParseFastPath: 0,
+            textDataRowViewHits: 0,
+            textDataRowViewFallbacks: 0,
             discardedRows: 0,
         };
     }
@@ -781,11 +787,29 @@ class NzConnection extends EventEmitter {
         }
     }
 
-    /** Called by the reader before it drains the rest of the response. */
-    _beginDiscardingRows(): void {
-        this._discardRows = true;
-        this._batchRowCache = null;
-        this._batchRowCacheIndex = 0;
+    private readonly _readerRowSource: ReaderRowSource = {
+        takeBufferedRow: () => this._takeBufferedRow(),
+        discardRows: () => {
+            this._discardRows = true;
+            this._batchRowCache = null;
+            this._batchRowCacheIndex = 0;
+        },
+    };
+
+    /**
+     * Pops the next row of the current batch. The generator checks the same
+     * batch first when resumed, so rows taken here are never yielded again.
+     */
+    private _takeBufferedRow(): unknown[] | undefined {
+        const cache = this._batchRowCache;
+        if (cache === null) return undefined;
+        const row = cache[this._batchRowCacheIndex++];
+        if (this._batchRowCacheIndex >= cache.length) {
+            this._batchRowCache = null;
+            this._batchRowCacheIndex = 0;
+        }
+        this._diag.batchCacheHits++;
+        return row;
     }
 
     /**
@@ -1450,7 +1474,7 @@ class NzConnection extends EventEmitter {
                     this._executing = false;
                 },
                 initialNextItem as GeneratorItem | null,
-                () => this._beginDiscardingRows()
+                this._readerRowSource
             ) as unknown as NzDataReader<T>;
         } catch (e) {
             if (sentQuery === null) {
@@ -1545,215 +1569,220 @@ class NzConnection extends EventEmitter {
     }
 
     private async *_responseGenerator(command: NzCommand): AsyncGenerator<ResponseMessage> {
+        // Protocol faults are recorded here rather than in a `yield*` wrapper:
+        // delegation adds a promise hop to every yielded row.
         try {
-            yield* this._responseGeneratorCore(command);
+            this._rowDescription = null;
+            this._textColumnParsers = null;
+            this._textBufferParsers = null;
+            this._binaryFieldParsers = null;
+            this._batchRowCache = null;
+            this._batchRowCacheIndex = 0;
+            this._discardRows = false;
+            this._tupdesc.clear();
+
+            let completed = false;
+
+            while (!completed) {
+                // Drain batch cache first
+                if (this._batchRowCache && this._batchRowCacheIndex < this._batchRowCache.length) {
+                    const cached = this._batchRowCache[this._batchRowCacheIndex++];
+                    if (this._batchRowCacheIndex === this._batchRowCache.length) {
+                        this._batchRowCache = null;
+                        this._batchRowCacheIndex = 0;
+                    }
+                    this._diag.batchCacheHits = (this._diag.batchCacheHits || 0) + 1;
+                    this._diag.generatorYields = (this._diag.generatorYields || 0) + 1;
+                    this._diag.generatorYieldsDataRow = (this._diag.generatorYieldsDataRow || 0) + 1;
+                    yield { type: 'DataRow', row: cached };
+                    continue;
+                }
+
+                let type = await this._readByte();
+
+                while (type === 0) {
+                    type = await this._readByte();
+                }
+
+                if (type === 'u'.charCodeAt(0)) {
+                    await this._external.handleExportStart();
+                    continue;
+                }
+
+                if (type === 'U'.charCodeAt(0)) {
+                    await this._external.handleExportData();
+                    continue;
+                }
+
+                if (type === 'l'.charCodeAt(0)) {
+                    await this._external.handleImport();
+                    continue;
+                }
+
+                if (type === 'x'.charCodeAt(0)) {
+                    await this._skipBytes(4);
+                    debug('Error operation cancel (Ext Tbl)');
+                    continue;
+                }
+
+                if (type === 'e'.charCodeAt(0)) {
+                    await this._readBytes(4);
+                    const len = PGUtil.readInt32(await this._readBytes(4));
+                    const logDirLength = validateProtocolLengthAfterOverhead(
+                        len,
+                        1,
+                        'fileTransfer.logDirectoryLength',
+                        'fileTransfer.logDirectoryPayloadLength'
+                    );
+                    const logDirBuf = await this._readBytes(logDirLength);
+                    const logDir = logDirBuf.toString('utf8');
+                    await this._readBytes(1); // null terminator
+
+                    const filenameBuf: number[] = [];
+                    let b = (await this._readBytes(1))[0];
+                    filenameBuf.push(b);
+                    while (true) {
+                        b = (await this._readBytes(1))[0];
+                        if (b === 0) break;
+                        filenameBuf.push(b);
+                    }
+                    const filename = Buffer.from(filenameBuf).toString('utf8');
+
+                    const logTypeBuf = await this._readBytes(4);
+                    const logType = PGUtil.readInt32(logTypeBuf);
+
+                    await this._external.saveLog(logDir, filename, logType);
+                    continue;
+                }
+
+                if (type === BackendMessageCode.RowStandard) {
+                    await this._skipBytes(4);
+                    if (this._discardRows) {
+                        await this._ensureBufferData(8);
+                        const rowLength = this._intBuf.readInt32BE(this._intBufStart + 4);
+                        validateProtocolLength(rowLength, 'rowStandardPayload', { allowZero: false });
+                        await this._discardBytes(8 + rowLength);
+                        this._diag.discardedRows += 1 + this._discardBufferedDbosRows();
+                        continue;
+                    }
+                    const row = await this._resReadDbosTuple(command);
+                    // Try batch-read more rows from internal buffer while data is hot
+                    if (!this._batchRowCache) {
+                        const cachedRows = this._tryReadDbosBatch();
+                        if (cachedRows.length > 0) {
+                            this._batchRowCache = cachedRows;
+                            this._batchRowCacheIndex = 0;
+                        }
+                    }
+                    this._diag.generatorYields = (this._diag.generatorYields || 0) + 1;
+                    this._diag.generatorYieldsDataRow = (this._diag.generatorYieldsDataRow || 0) + 1;
+                    yield { type: 'DataRow', row };
+                    continue;
+                }
+
+                await this._skipBytes(4);
+
+                if (type === BackendMessageCode.CommandComplete) {
+                    const len = validateProtocolLength(await this._readInt32(), 'commandCompletePayload');
+                    const data = await this._readBytes(len);
+                    const commandText = data.toString('utf8');
+                    debug('CommandComplete:', commandText);
+                    const rowsAffected = parseCommandCompleteRows(commandText);
+                    command._recordsAffected = rowsAffected;
+                    this._diag.generatorYields = (this._diag.generatorYields || 0) + 1;
+                    this._diag.generatorYieldsCmdComplete = (this._diag.generatorYieldsCmdComplete || 0) + 1;
+                    yield { type: 'CommandComplete', text: commandText, rowsAffected };
+                    continue;
+                }
+
+                if (type === BackendMessageCode.ReadyForQuery) {
+                    completed = true;
+                    this._diag.generatorYields = (this._diag.generatorYields || 0) + 1;
+                    yield { type: 'ReadyForQuery' };
+                    continue;
+                }
+
+                if (type === BackendMessageCode.ReadyForQueryAlt) {
+                    completed = true;
+                    continue;
+                }
+                if (type === BackendMessageCode.ControlZero || type === BackendMessageCode.ControlA) {
+                    continue;
+                }
+
+                if (type === BackendMessageCode.BackendPayloadP) {
+                    const len = validateProtocolLength(await this._readInt32(), 'backendPayloadP');
+                    await this._readBytes(len);
+                    continue;
+                }
+
+                if (type === BackendMessageCode.ErrorResponse) {
+                    const len = validateProtocolLength(await this._readInt32(), 'errorResponsePayload');
+                    const data = await this._readBytes(len);
+                    const err = createNzDatabaseError(data);
+                    yield { type: 'ErrorResponse', message: err.message, error: err };
+                    continue;
+                }
+
+                if (type === BackendMessageCode.RowDescription) {
+                    const len = validateProtocolLength(await this._readInt32(), 'rowDescriptionPayload');
+                    const data = await this._readBytes(len);
+                    this._parseRowDescription(data, command);
+                    this._diag.generatorYields = (this._diag.generatorYields || 0) + 1;
+                    this._diag.generatorYieldsRowDesc = (this._diag.generatorYieldsRowDesc || 0) + 1;
+                    yield { type: 'RowDescription', columns: this._rowDescription as unknown as ColumnInfo[] };
+                    continue;
+                }
+
+                if (type === BackendMessageCode.DataRow) {
+                    const len = validateProtocolLength(await this._readInt32(), 'dataRowPayload');
+                    if (this._discardRows) {
+                        await this._discardBytes(len);
+                        this._diag.discardedRows++;
+                        continue;
+                    }
+                    this._diag.textParseDataRowCalls = (this._diag.textParseDataRowCalls || 0) + 1;
+                    const data = await this._readBytesView(len);
+                    const row = this._parseDataRow(data);
+                    if (!this._batchRowCache) {
+                        const cachedRows = this._tryReadDataRowBatch();
+                        if (cachedRows.length > 0) {
+                            this._batchRowCache = cachedRows;
+                            this._batchRowCacheIndex = 0;
+                        }
+                    }
+                    this._diag.generatorYields = (this._diag.generatorYields || 0) + 1;
+                    this._diag.generatorYieldsDataRow = (this._diag.generatorYieldsDataRow || 0) + 1;
+                    yield { type: 'DataRow', row };
+                    continue;
+                }
+
+                if (type === BackendMessageCode.RowDescriptionStandard) {
+                    const len = validateProtocolLength(await this._readInt32(), 'rowDescriptionStandardPayload');
+                    const data = await this._readBytes(len);
+                    this._tupdesc.parse(data, command._cachedRowDescription);
+                    this._binaryFieldParsers = this._buildBinaryFieldParsers();
+                    yield { type: 'RowDescriptionStandard', desc: this._tupdesc };
+                    continue;
+                }
+
+                if (type === BackendMessageCode.NoticeResponse) {
+                    const len = validateProtocolLength(await this._readInt32(), 'noticeResponsePayload');
+                    const data = await this._readBytes(len);
+                    const message = data.toString('utf8').replace(/\0/g, '').trim();
+                    debug(`Notice: ${message}`);
+                    this.emit('notice', { message });
+                    yield { type: 'NoticeResponse', message };
+                    continue;
+                }
+
+                debug('Unknown message:', `0x${type.toString(16)}`);
+                const len = validateProtocolLength(await this._readInt32(), 'unknownMessagePayload');
+                if (len > 0) await this._readBytes(len);
+            }
         } catch (err) {
             if (err instanceof NzProtocolError) this._markProtocolFault();
             throw err;
-        }
-    }
-
-    private async *_responseGeneratorCore(command: NzCommand): AsyncGenerator<ResponseMessage> {
-        this._rowDescription = null;
-        this._textColumnParsers = null;
-        this._textBufferParsers = null;
-        this._binaryFieldParsers = null;
-        this._batchRowCache = null;
-        this._batchRowCacheIndex = 0;
-        this._discardRows = false;
-        this._tupdesc.clear();
-
-        let completed = false;
-
-        while (!completed) {
-            // Drain batch cache first
-            if (this._batchRowCache && this._batchRowCacheIndex < this._batchRowCache.length) {
-                const cached = this._batchRowCache[this._batchRowCacheIndex++];
-                if (this._batchRowCacheIndex === this._batchRowCache.length) {
-                    this._batchRowCache = null;
-                    this._batchRowCacheIndex = 0;
-                }
-                this._diag.batchCacheHits = (this._diag.batchCacheHits || 0) + 1;
-                this._diag.generatorYields = (this._diag.generatorYields || 0) + 1;
-                this._diag.generatorYieldsDataRow = (this._diag.generatorYieldsDataRow || 0) + 1;
-                yield { type: 'DataRow', row: cached };
-                continue;
-            }
-
-            let type = await this._readByte();
-
-            while (type === 0) {
-                type = await this._readByte();
-            }
-
-            if (type === 'u'.charCodeAt(0)) {
-                await this._external.handleExportStart();
-                continue;
-            }
-
-            if (type === 'U'.charCodeAt(0)) {
-                await this._external.handleExportData();
-                continue;
-            }
-
-            if (type === 'l'.charCodeAt(0)) {
-                await this._external.handleImport();
-                continue;
-            }
-
-            if (type === 'x'.charCodeAt(0)) {
-                await this._skipBytes(4);
-                debug('Error operation cancel (Ext Tbl)');
-                continue;
-            }
-
-            if (type === 'e'.charCodeAt(0)) {
-                await this._readBytes(4);
-                const len = PGUtil.readInt32(await this._readBytes(4));
-                const logDirLength = validateProtocolLengthAfterOverhead(
-                    len,
-                    1,
-                    'fileTransfer.logDirectoryLength',
-                    'fileTransfer.logDirectoryPayloadLength'
-                );
-                const logDirBuf = await this._readBytes(logDirLength);
-                const logDir = logDirBuf.toString('utf8');
-                await this._readBytes(1); // null terminator
-
-                const filenameBuf: number[] = [];
-                let b = (await this._readBytes(1))[0];
-                filenameBuf.push(b);
-                while (true) {
-                    b = (await this._readBytes(1))[0];
-                    if (b === 0) break;
-                    filenameBuf.push(b);
-                }
-                const filename = Buffer.from(filenameBuf).toString('utf8');
-
-                const logTypeBuf = await this._readBytes(4);
-                const logType = PGUtil.readInt32(logTypeBuf);
-
-                await this._external.saveLog(logDir, filename, logType);
-                continue;
-            }
-
-            if (type === BackendMessageCode.RowStandard) {
-                await this._skipBytes(4);
-                if (this._discardRows) {
-                    await this._ensureBufferData(8);
-                    const rowLength = this._intBuf.readInt32BE(this._intBufStart + 4);
-                    validateProtocolLength(rowLength, 'rowStandardPayload', { allowZero: false });
-                    await this._discardBytes(8 + rowLength);
-                    this._diag.discardedRows += 1 + this._discardBufferedDbosRows();
-                    continue;
-                }
-                const row = await this._resReadDbosTuple(command);
-                // Try batch-read more rows from internal buffer while data is hot
-                if (!this._batchRowCache) {
-                    const cachedRows = this._tryReadDbosBatch();
-                    if (cachedRows.length > 0) {
-                        this._batchRowCache = cachedRows;
-                        this._batchRowCacheIndex = 0;
-                    }
-                }
-                this._diag.generatorYields = (this._diag.generatorYields || 0) + 1;
-                this._diag.generatorYieldsDataRow = (this._diag.generatorYieldsDataRow || 0) + 1;
-                yield { type: 'DataRow', row };
-                continue;
-            }
-
-            await this._skipBytes(4);
-
-            if (type === BackendMessageCode.CommandComplete) {
-                const len = validateProtocolLength(await this._readInt32(), 'commandCompletePayload');
-                const data = await this._readBytes(len);
-                const commandText = data.toString('utf8');
-                debug('CommandComplete:', commandText);
-                const rowsAffected = parseCommandCompleteRows(commandText);
-                command._recordsAffected = rowsAffected;
-                this._diag.generatorYields = (this._diag.generatorYields || 0) + 1;
-                this._diag.generatorYieldsCmdComplete = (this._diag.generatorYieldsCmdComplete || 0) + 1;
-                yield { type: 'CommandComplete', text: commandText, rowsAffected };
-                continue;
-            }
-
-            if (type === BackendMessageCode.ReadyForQuery) {
-                completed = true;
-                this._diag.generatorYields = (this._diag.generatorYields || 0) + 1;
-                yield { type: 'ReadyForQuery' };
-                continue;
-            }
-
-            if (type === BackendMessageCode.ReadyForQueryAlt) {
-                completed = true;
-                continue;
-            }
-            if (type === BackendMessageCode.ControlZero || type === BackendMessageCode.ControlA) {
-                continue;
-            }
-
-            if (type === BackendMessageCode.BackendPayloadP) {
-                const len = validateProtocolLength(await this._readInt32(), 'backendPayloadP');
-                await this._readBytes(len);
-                continue;
-            }
-
-            if (type === BackendMessageCode.ErrorResponse) {
-                const len = validateProtocolLength(await this._readInt32(), 'errorResponsePayload');
-                const data = await this._readBytes(len);
-                const err = createNzDatabaseError(data);
-                yield { type: 'ErrorResponse', message: err.message, error: err };
-                continue;
-            }
-
-            if (type === BackendMessageCode.RowDescription) {
-                const len = validateProtocolLength(await this._readInt32(), 'rowDescriptionPayload');
-                const data = await this._readBytes(len);
-                this._parseRowDescription(data, command);
-                this._diag.generatorYields = (this._diag.generatorYields || 0) + 1;
-                this._diag.generatorYieldsRowDesc = (this._diag.generatorYieldsRowDesc || 0) + 1;
-                yield { type: 'RowDescription', columns: this._rowDescription as unknown as ColumnInfo[] };
-                continue;
-            }
-
-            if (type === BackendMessageCode.DataRow) {
-                const len = validateProtocolLength(await this._readInt32(), 'dataRowPayload');
-                if (this._discardRows) {
-                    await this._discardBytes(len);
-                    this._diag.discardedRows++;
-                    continue;
-                }
-                this._diag.textParseDataRowCalls = (this._diag.textParseDataRowCalls || 0) + 1;
-                const data = await this._readBytesView(len);
-                const row = this._parseDataRow(data);
-                this._diag.generatorYields = (this._diag.generatorYields || 0) + 1;
-                this._diag.generatorYieldsDataRow = (this._diag.generatorYieldsDataRow || 0) + 1;
-                yield { type: 'DataRow', row };
-                continue;
-            }
-
-            if (type === BackendMessageCode.RowDescriptionStandard) {
-                const len = validateProtocolLength(await this._readInt32(), 'rowDescriptionStandardPayload');
-                const data = await this._readBytes(len);
-                this._tupdesc.parse(data, command._cachedRowDescription);
-                this._binaryFieldParsers = this._buildBinaryFieldParsers();
-                yield { type: 'RowDescriptionStandard', desc: this._tupdesc };
-                continue;
-            }
-
-            if (type === BackendMessageCode.NoticeResponse) {
-                const len = validateProtocolLength(await this._readInt32(), 'noticeResponsePayload');
-                const data = await this._readBytes(len);
-                const message = data.toString('utf8').replace(/\0/g, '').trim();
-                debug(`Notice: ${message}`);
-                this.emit('notice', { message });
-                yield { type: 'NoticeResponse', message };
-                continue;
-            }
-
-            debug('Unknown message:', `0x${type.toString(16)}`);
-            const len = validateProtocolLength(await this._readInt32(), 'unknownMessagePayload');
-            if (len > 0) await this._readBytes(len);
         }
     }
 
@@ -2056,18 +2085,53 @@ class NzConnection extends EventEmitter {
             if (available < 13) break;
             const payloadStart = this._intBufStart + 5;
             const rowLen = this._intBuf.readInt32BE(payloadStart + 4);
-            validateProtocolLength(rowLen, 'rowStandardPayload', { allowZero: false });
             const payloadEnd = payloadStart + 8 + rowLen;
-            if (payloadEnd > this._intBufEnd) break;
+            if (rowLen <= 0 || payloadEnd > this._intBufEnd) break;
 
-            // In-place parse without subarray
+            // In-place parse without subarray. A malformed row is left for the
+            // regular path, so its error surfaces from the read() that reaches it.
             const dataStart = payloadStart + 8;
-            rows.push(this._parseDbosRowInPlace(this._intBuf, dataStart, payloadEnd));
+            try {
+                rows.push(this._parseDbosRowInPlace(this._intBuf, dataStart, payloadEnd));
+            } catch {
+                break;
+            }
 
             this._intBufStart = payloadEnd;
         }
 
         this._diag.tryReadDbosBatchRows = (this._diag.tryReadDbosBatchRows || 0) + rows.length;
+        return rows;
+    }
+
+    /**
+     * Text-protocol counterpart of `_tryReadDbosBatch`: parses every complete
+     * DataRow frame (`'D'` + shared header + length + payload) already in the
+     * buffer, so catalog-style results avoid four awaited reads per row.
+     */
+    private _tryReadDataRowBatch(): unknown[][] {
+        const rows: unknown[][] = [];
+        while (
+            this._intBufEnd - this._intBufStart >= 9 &&
+            this._intBuf[this._intBufStart] === BackendMessageCode.DataRow
+        ) {
+            const len = this._intBuf.readInt32BE(this._intBufStart + 5);
+            const payloadStart = this._intBufStart + 9;
+            const payloadEnd = payloadStart + len;
+            if (len < 0 || payloadEnd > this._intBufEnd) break;
+            let row: unknown[];
+            try {
+                row = this._parseDataRow(this._intBuf.subarray(payloadStart, payloadEnd));
+            } catch {
+                // Leave the frame for the regular path, so the error surfaces
+                // from the read() that reaches this row, not from an earlier one.
+                break;
+            }
+            this._diag.textParseDataRowCalls++;
+            this._diag.textDataRowViewHits++;
+            rows.push(row);
+            this._intBufStart = payloadEnd;
+        }
         return rows;
     }
 
