@@ -19,8 +19,15 @@ export const POSTGRES_EPOCH_MS = Date.UTC(2000, 0, 1);
  * @param data - 8 bytes little-endian
  */
 export function toDateTimeFrom8Bytes(data: Buffer, offset: number = 0): Date {
-    const micros = data.readBigInt64LE(offset);
-    const ms = Number(micros / 1000n);
+    // Exact int64 microseconds / 1000 (truncated toward zero) without BigInt:
+    // 2^32 = 4294967 * 1000 + 296, so micros = hi * 4294967 * 1000 + (hi * 296 + lo)
+    // and every term stays a safe integer over the whole int64 range.
+    const lo = data.readUInt32LE(offset);
+    const hi = data.readInt32LE(offset + 4);
+    const rest = hi * 296 + lo;
+    const restMs = Math.floor(rest / 1000);
+    let ms = hi * 4294967 + restMs;
+    if (hi < 0 && rest !== restMs * 1000) ms += 1;
     return new Date(POSTGRES_EPOCH_MS + ms);
 }
 
@@ -35,35 +42,56 @@ export function toDateTimeFrom4Bytes(data: Buffer, offset: number = 0): Date {
     return new Date(POSTGRES_EPOCH_MS + days * MS_PER_DAY);
 }
 
+/** TimeValue decoded from the binary protocol; `toString` lives on the prototype. */
+class BinaryTimeValue implements TimeValue {
+    hours: number;
+    minutes: number;
+    seconds: number;
+    microseconds: number;
+
+    constructor(hours: number, minutes: number, seconds: number, microseconds: number) {
+        this.hours = hours;
+        this.minutes = minutes;
+        this.seconds = seconds;
+        this.microseconds = microseconds;
+    }
+
+    toString(): string {
+        const hh = String(this.hours).padStart(2, '0');
+        const mm = String(this.minutes).padStart(2, '0');
+        const ss = String(this.seconds).padStart(2, '0');
+        if (this.microseconds > 0) {
+            const us = String(this.microseconds).padStart(6, '0');
+            return `${hh}:${mm}:${ss}.${us}`;
+        }
+        return `${hh}:${mm}:${ss}`;
+    }
+}
+
 /**
  * Convert 8-byte time (microseconds) to object
  * @param data - 8 bytes little-endian
  */
 export function timeRecvFloat(data: Buffer, offset: number = 0): TimeValue {
-    const micros = data.readBigInt64LE(offset);
-    const totalSeconds = Number(micros / 1000000n);
-    const remainingMicros = Number(micros % 1000000n);
+    const hi = data.readInt32LE(offset + 4);
+    let totalSeconds: number;
+    let remainingMicros: number;
+    if (hi < 0x200000 && hi >= -0x200000) {
+        // |micros| < 2^53: exact in Number arithmetic (always true for a time of day).
+        const micros = hi * 0x100000000 + data.readUInt32LE(offset);
+        totalSeconds = Math.trunc(micros / 1_000_000) + 0; // + 0 turns -0 into 0, like BigInt
+        remainingMicros = micros - totalSeconds * 1_000_000;
+    } else {
+        const micros = data.readBigInt64LE(offset);
+        totalSeconds = Number(micros / 1000000n);
+        remainingMicros = Number(micros % 1000000n);
+    }
 
     const hours = Math.floor(totalSeconds / 3600);
     const minutes = Math.floor((totalSeconds % 3600) / 60);
     const seconds = totalSeconds % 60;
 
-    return {
-        hours,
-        minutes,
-        seconds,
-        microseconds: remainingMicros,
-        toString(): string {
-            const hh = String(hours).padStart(2, '0');
-            const mm = String(minutes).padStart(2, '0');
-            const ss = String(seconds).padStart(2, '0');
-            if (remainingMicros > 0) {
-                const us = String(remainingMicros).padStart(6, '0');
-                return `${hh}:${mm}:${ss}.${us}`;
-            }
-            return `${hh}:${mm}:${ss}`;
-        },
-    };
+    return new BinaryTimeValue(hours, minutes, seconds, remainingMicros);
 }
 
 /**

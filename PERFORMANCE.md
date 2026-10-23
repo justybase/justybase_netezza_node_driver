@@ -201,3 +201,33 @@ decimal types, while Node returns exact text for wide values.)
 Golden digests unchanged.
 
 **Decision: ACCEPTED.**
+
+---
+
+## 5. TIMESTAMP and TIME without BigInt
+
+**Problem.** Every TIMESTAMP did `readBigInt64LE` + BigInt division; every TIME
+did two BigInt operations and created a new `toString` closure per value.
+
+**Change.**
+
+- TIMESTAMP: exact `int64 / 1000` truncated toward zero, in Number arithmetic,
+  using `2^32 = 4294967 * 1000 + 296`. All terms stay safe integers over the
+  full int64 range (0001-01-01 … 9999-12-31 included).
+- TIME: Number arithmetic when |micros| < 2^53 (always, for a time of day), with
+  the BigInt path kept as a fallback. Values are `BinaryTimeValue` instances
+  with `toString` on the prototype; own fields and JSON are unchanged.
+- `tests/TemporalDecoding.unit.test.js` compares against the previous BigInt
+  implementation on edge values (±2^53, int64 min/max, 0001-01-01,
+  9999-12-31, -1 µs) and 20000 random values, including `-0` vs `0`.
+  Mutations of the truncation correction and of the `-0` normalization are caught.
+- INT8 still returns `bigint` (public contract).
+
+| Fixture | Scenario | Before ms | After ms |
+| --- | --- | ---: | ---: |
+| fact200k | FullRead_GetValue | 97.08 | 84.76 |
+| fact200k | FullDecode_NoGetValue | 89.46 | 78.68 |
+
+Golden digests unchanged.
+
+**Decision: ACCEPTED.**
