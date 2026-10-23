@@ -2333,14 +2333,14 @@ class NzConnection extends EventEmitter {
                 case NzType.NzTypeNChar:
                 case NzType.NzTypeNVarChar:
                     parsers[i] = (buf: Buffer, off: number) => {
-                        const cursize = buf.readInt16LE(off) - 2;
+                        const cursize = buf.readUInt16LE(off) - 2;
                         return decodeUtf8(buf, off + 2, off + 2 + cursize);
                     };
                     break;
                 case NzType.NzTypeVarChar:
                 case NzType.NzTypeVarFixedChar:
                     parsers[i] = (buf: Buffer, off: number) => {
-                        const cursize = buf.readInt16LE(off) - 2;
+                        const cursize = buf.readUInt16LE(off) - 2;
                         return decodeLatin1(buf, off + 2, off + 2 + cursize);
                     };
                     break;
@@ -2409,12 +2409,12 @@ class NzConnection extends EventEmitter {
                 return buffer.toString('latin1', offset, offset + fldLen).trimEnd();
             case NzType.NzTypeNChar:
             case NzType.NzTypeNVarChar: {
-                const cursize = buffer.readInt16LE(offset) - 2;
+                const cursize = buffer.readUInt16LE(offset) - 2;
                 return buffer.toString('utf8', offset + 2, offset + 2 + cursize);
             }
             case NzType.NzTypeVarChar:
             case NzType.NzTypeVarFixedChar: {
-                const s = buffer.readInt16LE(offset) - 2;
+                const s = buffer.readUInt16LE(offset) - 2;
                 return buffer.toString('latin1', offset + 2, offset + 2 + s);
             }
             case NzType.NzTypeInt8:

@@ -19,15 +19,15 @@ export const POSTGRES_EPOCH_MS = Date.UTC(2000, 0, 1);
  * @param data - 8 bytes little-endian
  */
 export function toDateTimeFrom8Bytes(data: Buffer, offset: number = 0): Date {
-    // Exact int64 microseconds / 1000 (truncated toward zero) without BigInt:
+    // Exact floor(int64 microseconds / 1000) without BigInt:
     // 2^32 = 4294967 * 1000 + 296, so micros = hi * 4294967 * 1000 + (hi * 296 + lo)
-    // and every term stays a safe integer over the whole int64 range.
+    // and every term stays a safe integer over the whole int64 range. Flooring
+    // (not truncating toward zero) keeps sub-millisecond instants before
+    // 2000-01-01 in the right millisecond: 1999-12-31 23:59:59.999999 must
+    // not become 2000-01-01 00:00:00.000.
     const lo = data.readUInt32LE(offset);
     const hi = data.readInt32LE(offset + 4);
-    const rest = hi * 296 + lo;
-    const restMs = Math.floor(rest / 1000);
-    let ms = hi * 4294967 + restMs;
-    if (hi < 0 && rest !== restMs * 1000) ms += 1;
+    const ms = hi * 4294967 + Math.floor((hi * 296 + lo) / 1000);
     return new Date(POSTGRES_EPOCH_MS + ms);
 }
 
