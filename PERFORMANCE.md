@@ -354,3 +354,30 @@ rows one generator step at a time.
 ("Before step" includes steps 1-7, chiefly the text-row batching of step 2.)
 
 **Decision: ACCEPTED.**
+
+---
+
+## 9. Per-execute statement scan
+
+**Problem.** Every execute runs `splitStatements` over the SQL to track
+transaction boundaries. It rebuilt the text one character at a time
+(`current += ch`), about 25 ns per character: 4.5 ms per execute for a
+176 KB generated statement.
+
+**Change.** Plain SQL is copied in runs (`sql.slice(runStart, i)`); blanked
+literals, comments and bodies still become a single space. Equivalence was
+checked against the previous implementation on 200000 random statements built
+from quotes, escapes, dollar tags, `BEGIN_PROC` bodies, comments and `;`
+(one-off fuzz; the behaviour is covered by `TransactionTracking.unit.test.js`).
+
+| SQL length | Before ms | After ms |
+| ---: | ---: | ---: |
+| 3 KB | 0.22 | 0.16 |
+| 33 KB | 1.11 | 0.35 |
+| 177 KB | 4.51 | 1.41 |
+
+Not changed: the per-execute timeout timer (needed for `commandTimeout`
+semantics) and `DbosTupleDesc.clear()` (a few small allocations per query):
+no measurable effect on the replay scenarios.
+
+**Decision: ACCEPTED.**
