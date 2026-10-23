@@ -231,3 +231,44 @@ did two BigInt operations and created a new `toString` closure per value.
 Golden digests unchanged.
 
 **Decision: ACCEPTED.**
+
+---
+
+## 6. Row loop: precomputed row plan and short-string fast path
+
+**Problem.** After steps 1-5 the profile showed `utf8Slice`/`toString`
+(NVARCHAR) at ~20% and `_parseDbosRowInPlace` at ~15% self time. The row loop
+re-validated descriptor invariants (`Number.isInteger` on sizes/offsets,
+var-index range, null-bitmap bounds) for every field of every row. Every
+string value, even `'0'`, was a native `Buffer#toString` call.
+
+**Change.**
+
+- `DbosRowPlan` is built once per result from the descriptor: field kind
+  (fixed / varying / after-fixed), offset, null byte and mask in typed arrays,
+  plus the end of the fixed area. Per row the fast loop checks the fixed-area
+  length once and validates the varying-field chain once (it was validated
+  before as well), then only tests null bits and calls the parsers. Irregular
+  descriptors, short rows and any anomaly fall back to the previous fully
+  checked decoder (`_parseDbosRowChecked`), which still reports the exact
+  protocol error.
+- `decodeUtf8` / `decodeLatin1` (`src/utils/textDecode.ts`): values of 1-4
+  bytes are built with `String.fromCharCode` (UTF-8 only when all bytes are
+  ASCII); everything else still uses `Buffer#toString`. Used for NVARCHAR/NCHAR,
+  VARCHAR and CHAR. Tested against `Buffer#toString` for every byte value.
+
+| Fixture | Scenario | Before ms | After ms |
+| --- | --- | ---: | ---: |
+| dimdate | FullRead_GetValue | 4.31 | 3.58 |
+| fact200k | FullRead_GetValue | 84.76 | 61.73 |
+| fact200k | FullDecode_NoGetValue | 78.68 | 57.66 |
+| fact200k | ForAwait_RowObjects | 141.61 | 89.99 |
+| fact200k | Query_RowObjects | 143.61 | 89.86 |
+
+Row plan alone (A/B with the plan disabled, string fast path enabled,
+fact200k `FullDecode_NoGetValue`, 15 samples, two rounds): 56.2 / 55.7 ms with
+the plan vs 62.0 / 67.9 ms without it. Most of the gain comes from the short-string
+path (fact200k NVARCHAR values are 1-3 digit strings); dimdate's longer names
+gain less. Golden digests unchanged.
+
+**Decision: ACCEPTED.**

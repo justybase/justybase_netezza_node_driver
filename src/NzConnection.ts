@@ -5,6 +5,7 @@ import type { Readable } from 'node:stream';
 import { EventEmitter } from 'node:events';
 import { Handshake } from './Handshake';
 import { PGUtil } from './utils/PGUtil';
+import { decodeLatin1, decodeUtf8 } from './utils/textDecode';
 import { NzCommand } from './NzCommand';
 import { NzDataReader, type GeneratorItem, type ColumnDescription, type ReaderRowSource } from './NzDataReader';
 import { DbosTupleDesc } from './DbosTupleDesc';
@@ -228,6 +229,28 @@ type TextValueParser = (value: string) => unknown;
 type TextBufferParser = (data: Buffer, offset: number, len: number) => unknown;
 type BinaryFieldParser = (buffer: Buffer, fieldStart: number) => unknown;
 
+const FIELD_FIXED = 0;
+const FIELD_VARYING = 1;
+const FIELD_AFTER_FIXED = 2;
+
+/**
+ * Per-result layout of a RowStandard row, validated once when the descriptor
+ * arrives, so the per-row loop only checks what depends on the row itself.
+ */
+interface DbosRowPlan {
+    parsers: BinaryFieldParser[];
+    kind: Uint8Array;
+    /** Fixed: byte offset in the row; varying: index into the varying-field starts. */
+    offset: Int32Array;
+    nullsAllowed: boolean;
+    nullByte: Int32Array;
+    nullMask: Uint8Array;
+    numVaryingFields: number;
+    fixedFieldsSize: number;
+    /** Highest end offset of any fixed field: rows at least this long need no per-field bounds checks. */
+    fixedAreaEnd: number;
+}
+
 /**
  * Netezza database connection.
  *
@@ -254,6 +277,7 @@ class NzConnection extends EventEmitter {
     private _textColumnParsers: TextValueParser[] | null = null;
     private _textBufferParsers: (TextBufferParser | null)[] | null = null;
     private _binaryFieldParsers: BinaryFieldParser[] | null = null;
+    private _dbosRowPlan: DbosRowPlan | null = null;
     private _tupdesc: DbosTupleDesc = new DbosTupleDesc();
     private _batchRowCache: unknown[][] | null = null;
     private _batchRowCacheIndex: number = 0;
@@ -1576,6 +1600,7 @@ class NzConnection extends EventEmitter {
             this._textColumnParsers = null;
             this._textBufferParsers = null;
             this._binaryFieldParsers = null;
+            this._dbosRowPlan = null;
             this._batchRowCache = null;
             this._batchRowCacheIndex = 0;
             this._discardRows = false;
@@ -1762,6 +1787,7 @@ class NzConnection extends EventEmitter {
                     const data = await this._readBytes(len);
                     this._tupdesc.parse(data, command._cachedRowDescription);
                     this._binaryFieldParsers = this._buildBinaryFieldParsers();
+                    this._dbosRowPlan = this._buildDbosRowPlan(this._binaryFieldParsers);
                     yield { type: 'RowDescriptionStandard', desc: this._tupdesc };
                     continue;
                 }
@@ -1914,11 +1940,126 @@ class NzConnection extends EventEmitter {
         return row;
     }
 
+    /**
+     * Returns a row plan when the descriptor has the regular shape the fast row
+     * loop relies on, or `null` to keep every row on the fully checked path
+     * (which then reports the exact protocol error).
+     */
+    private _buildDbosRowPlan(parsers: BinaryFieldParser[]): DbosRowPlan | null {
+        const desc = this._tupdesc;
+        const numFields = desc.numFields;
+        const numVaryingFields = desc.numVaryingFields ?? 0;
+        const fixedFieldsSize = desc.fixedFieldsSize;
+        if (!Number.isInteger(numFields) || numFields < 0 || parsers.length !== numFields) return null;
+        if (numVaryingFields < 0 || !Number.isInteger(fixedFieldsSize) || fixedFieldsSize < 0) return null;
+
+        const kind = new Uint8Array(numFields);
+        const offset = new Int32Array(numFields);
+        const nullByte = new Int32Array(numFields);
+        const nullMask = new Uint8Array(numFields);
+        let fixedAreaEnd = 0;
+        for (let i = 0; i < numFields; i++) {
+            const fixedSize = desc.fieldFixedSize[i];
+            const fieldOffset = desc.fieldOffset[i];
+            if (fixedSize !== 0) {
+                if (
+                    !Number.isInteger(fixedSize) ||
+                    fixedSize < 0 ||
+                    !Number.isInteger(fieldOffset) ||
+                    fieldOffset < 0
+                ) {
+                    return null;
+                }
+                kind[i] = FIELD_FIXED;
+                offset[i] = fieldOffset;
+                fixedAreaEnd = Math.max(fixedAreaEnd, fieldOffset + fixedSize);
+            } else if (numVaryingFields > 0) {
+                if (!Number.isInteger(fieldOffset) || fieldOffset < 0 || fieldOffset >= numVaryingFields) return null;
+                kind[i] = FIELD_VARYING;
+                offset[i] = fieldOffset;
+            } else {
+                kind[i] = FIELD_AFTER_FIXED;
+                fixedAreaEnd = Math.max(fixedAreaEnd, fixedFieldsSize);
+            }
+            if (desc.nullsAllowed) {
+                const byte = desc.fieldNullByteOffset[i];
+                if (!Number.isInteger(byte) || byte < 0) return null;
+                nullByte[i] = byte;
+                nullMask[i] = desc.fieldNullBitMask[i];
+                fixedAreaEnd = Math.max(fixedAreaEnd, byte + 1);
+            }
+        }
+        if (numVaryingFields > 0) fixedAreaEnd = Math.max(fixedAreaEnd, fixedFieldsSize);
+        return {
+            parsers,
+            kind,
+            offset,
+            nullsAllowed: !!desc.nullsAllowed,
+            nullByte,
+            nullMask,
+            numVaryingFields,
+            fixedFieldsSize,
+            fixedAreaEnd,
+        };
+    }
+
     private _parseDbosRowInPlace(buffer: Buffer, baseOffset: number, endOffset: number = buffer.length): unknown[] {
+        const plan = this._dbosRowPlan;
+        if (
+            plan === null ||
+            baseOffset < 0 ||
+            endOffset > buffer.length ||
+            baseOffset + plan.fixedAreaEnd > endOffset
+        ) {
+            return this._parseDbosRowChecked(buffer, baseOffset, endOffset);
+        }
+        this._diag.parseDbosRowCalls++;
+
+        // Varying fields are laid out back to back after the fixed area; their
+        // starts are found and validated once per row.
+        const numVaryingFields = plan.numVaryingFields;
+        let varFieldStarts: number[] = this._varOffsetsScratch;
+        if (numVaryingFields > 0) {
+            if (varFieldStarts.length < numVaryingFields) {
+                varFieldStarts = this._varOffsetsScratch = new Array(numVaryingFields);
+            }
+            let voff = baseOffset + plan.fixedFieldsSize;
+            for (let j = 0; j < numVaryingFields; j++) {
+                if (voff + 2 > endOffset) return this._parseDbosRowChecked(buffer, baseOffset, endOffset);
+                varFieldStarts[j] = voff;
+                const vlen = buffer.readUInt16LE(voff);
+                voff += vlen + (vlen & 1);
+                if (vlen < 2 || voff > endOffset) return this._parseDbosRowChecked(buffer, baseOffset, endOffset);
+            }
+        }
+
+        const { parsers, kind, offset, nullByte, nullMask } = plan;
+        const numFields = parsers.length;
+        const row = new Array(numFields);
+        const nullsAllowed = plan.nullsAllowed;
+        for (let i = 0; i < numFields; i++) {
+            if (nullsAllowed && (buffer[baseOffset + nullByte[i]] & nullMask[i]) !== 0) {
+                row[i] = null;
+                continue;
+            }
+            const k = kind[i];
+            const fieldStart =
+                k === FIELD_FIXED
+                    ? baseOffset + offset[i]
+                    : k === FIELD_VARYING
+                      ? varFieldStarts[offset[i]]
+                      : baseOffset + plan.fixedFieldsSize;
+            row[i] = parsers[i](buffer, fieldStart);
+        }
+        return row;
+    }
+
+    /** Row decoder that validates every field; used for irregular descriptors and to report malformed rows. */
+    private _parseDbosRowChecked(buffer: Buffer, baseOffset: number, endOffset: number = buffer.length): unknown[] {
         const numFields = this._tupdesc.numFields;
         const parsers = this._binaryFieldParsers;
         const row = new Array(numFields);
-        this._diag.parseDbosRowCalls = (this._diag.parseDbosRowCalls || 0) + 1;
+        this._diag.parseDbosRowCalls++;
 
         if (
             !Number.isInteger(baseOffset) ||
@@ -2145,20 +2286,20 @@ class NzConnection extends EventEmitter {
 
             switch (fldType) {
                 case NzType.NzTypeChar:
-                    parsers[i] = (buf: Buffer, off: number) => buf.toString('latin1', off, off + fldLen).trimEnd();
+                    parsers[i] = (buf: Buffer, off: number) => decodeLatin1(buf, off, off + fldLen).trimEnd();
                     break;
                 case NzType.NzTypeNChar:
                 case NzType.NzTypeNVarChar:
                     parsers[i] = (buf: Buffer, off: number) => {
                         const cursize = buf.readInt16LE(off) - 2;
-                        return buf.toString('utf8', off + 2, off + 2 + cursize);
+                        return decodeUtf8(buf, off + 2, off + 2 + cursize);
                     };
                     break;
                 case NzType.NzTypeVarChar:
                 case NzType.NzTypeVarFixedChar:
                     parsers[i] = (buf: Buffer, off: number) => {
                         const cursize = buf.readInt16LE(off) - 2;
-                        return buf.toString('latin1', off + 2, off + 2 + cursize);
+                        return decodeLatin1(buf, off + 2, off + 2 + cursize);
                     };
                     break;
                 case NzType.NzTypeInt8:
