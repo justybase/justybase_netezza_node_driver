@@ -358,29 +358,116 @@ export function parseTextValue(value: string, typeOid: number, typeMod: number =
     }
 }
 
-const NUMERIC_PART_BITS = 32n;
+// Scratch for wide values as 16-bit limbs (most significant first): a
+// remainder below 1e9 times 2^16 plus a limb stays far below 2^53, so the
+// base-1e9 long division is exact in Number arithmetic.
+const WIDE_LIMBS = new Uint32Array(16);
 
-function readSignedNumericBigInt(data: Buffer, partCount: number, offset: number = 0): bigint {
-    if (partCount <= 0) {
-        return 0n;
-    }
+const NINE_ZEROS = '000000000';
 
-    let raw = 0n;
+/** Inserts the decimal point into a short (flat) digit chunk when the scale boundary falls inside it. */
+function placeDecimalPoint(chunk: string, emitted: number, scale: number): string {
+    const fraction = scale - emitted;
+    if (fraction <= 0 || fraction > chunk.length) return chunk;
+    const split = chunk.length - fraction;
+    return `${split === 0 ? '' : chunk.slice(0, split)}.${chunk.slice(split)}`;
+}
+
+/**
+ * Exact decimal text of any word count without BigInt: base-1e9 long division
+ * over 16-bit limbs. The decimal point is placed while the 9-digit chunks are
+ * assembled, so the long result string is never sliced (and flattened) again.
+ */
+function formatWideNumeric(data: Buffer, partCount: number, offset: number, scale: number): string {
+    const n = partCount * 2;
+    const limbs = n <= WIDE_LIMBS.length ? WIDE_LIMBS : new Uint32Array(n);
     for (let i = 0; i < partCount; i++) {
-        raw = (raw << NUMERIC_PART_BITS) | BigInt(data.readUInt32LE(offset + i * 4));
+        const word = data.readUInt32LE(offset + i * 4);
+        limbs[2 * i] = word >>> 16;
+        limbs[2 * i + 1] = word & 0xffff;
     }
-
-    const totalBits = BigInt(partCount) * NUMERIC_PART_BITS;
-    const signBit = 1n << (totalBits - 1n);
-    if ((raw & signBit) !== 0n) {
-        raw -= 1n << totalBits;
+    const isMinus = (limbs[0] & 0x8000) !== 0;
+    if (isMinus) {
+        // Two's complement negation: invert, then add one from the least significant limb.
+        let carry = 1;
+        for (let i = n - 1; i >= 0; i--) {
+            const v = (~limbs[i] & 0xffff) + carry;
+            limbs[i] = v & 0xffff;
+            carry = v >>> 16;
+        }
     }
+    let first = 0;
+    while (first < n && limbs[first] === 0) first++;
+    let text = '';
+    let emitted = 0;
+    while (first < n) {
+        let rem = 0;
+        for (let i = first; i < n; i++) {
+            const cur = rem * 65536 + limbs[i];
+            const q = (cur / 1e9) | 0; // < 65536
+            limbs[i] = q;
+            rem = cur - q * 1e9;
+        }
+        while (first < n && limbs[first] === 0) first++;
+        let chunk = `${rem}`;
+        if (first < n && chunk.length < 9) chunk = NINE_ZEROS.slice(chunk.length) + chunk;
+        text = placeDecimalPoint(chunk, emitted, scale) + text;
+        emitted += chunk.length;
+    }
+    if (emitted === 0) {
+        text = '0';
+        emitted = 1;
+    }
+    if (scale >= emitted) {
+        // No integer digits were produced: "0." plus the missing leading fraction zeros.
+        text = `0.${'0'.repeat(scale - emitted)}${text.charCodeAt(0) === 46 ? text.slice(1) : text}`;
+    }
+    return isMinus ? `-${text}` : text;
+}
 
-    return raw;
+const POW10: readonly number[] = Array.from({ length: 23 }, (_, i) => 10 ** i);
+const TWO_POW_32 = 0x100000000;
+
+/** Formats an unscaled integer as exact decimal text with `scale` fraction digits. */
+function formatNumeric(digits: string, isMinus: boolean, scale: number): string {
+    let result = digits;
+    if (scale !== 0) {
+        const padded = result.length > scale ? result : result.padStart(scale + 1, '0');
+        const decimalStart = padded.length - scale;
+        result = `${padded.slice(0, decimalStart)}.${padded.slice(decimalStart)}`;
+    }
+    return isMinus ? `-${result}` : result;
+}
+
+/**
+ * Reads the unscaled value when it is a safe integer, otherwise returns NaN.
+ * Words are 32-bit little-endian, most significant word first, two's complement.
+ */
+function readSafeUnscaled(data: Buffer, partCount: number, offset: number): number {
+    if (partCount === 1) return data.readInt32LE(offset);
+    // The two least significant words; every higher word must be pure sign extension.
+    const hiOffset = offset + (partCount - 2) * 4;
+    const hi = data.readInt32LE(hiOffset);
+    const lo = data.readUInt32LE(hiOffset + 4);
+    const extension = hi < 0 ? -1 : 0;
+    for (let i = 0; i < partCount - 2; i++) {
+        if (data.readInt32LE(offset + i * 4) !== extension) return Number.NaN;
+    }
+    // |hi| < 2^21 keeps hi * 2^32 + lo within ±2^53.
+    if (hi >= 0x200000 || hi < -0x200000) return Number.NaN;
+    return hi * TWO_POW_32 + lo;
 }
 
 /**
  * Convert Netezza numeric to JavaScript number or string (for high precision)
+ *
+ * A number is returned only for precision <= 15 when the exact decimal text
+ * survives a `parseFloat`/`String` round trip (no trailing fraction zero, not
+ * printed in exponent form); otherwise the exact decimal text is returned.
+ * That rule is evaluated arithmetically for safe-integer values, without
+ * building or parsing text; wider values are converted by exact base-1e9
+ * long division instead of BigInt.
+ *
  * @param data - numeric data
  * @param prec - precision
  * @param scale - scale
@@ -395,59 +482,33 @@ export function getCsNumeric(
 ): number | string {
     const partCount = digitCount > 0 ? digitCount : prec <= 9 ? 1 : prec <= 18 ? 2 : 4;
 
-    // Fast path: partCount <= 2 and prec <= 15 -> use Number arithmetic, no BigInt
-    if (partCount <= 2 && prec <= 15) {
-        let unscaled: number;
-        if (partCount === 1) {
-            // PartCount=1: single 32-bit word at offset, two's complement
-            const word0 = data.readUInt32LE(offset);
-            unscaled = word0 >= 0x80000000 ? word0 - 0x100000000 : word0;
-        } else {
-            // PartCount=2: Netezza stores NUMERIC as big-endian 32-bit words (most significant first)
-            const hi = data.readInt32LE(offset);
-            const lo = data.readUInt32LE(offset + 4);
-            unscaled = hi * 0x100000000 + lo;
+    const unscaled = readSafeUnscaled(data, partCount, offset);
+    if (unscaled === unscaled) {
+        const abs = unscaled < 0 ? -unscaled : unscaled;
+        if (prec <= 15 && abs < 1e15) {
+            // At most 15 significant digits: the division is correctly rounded,
+            // so it equals parseFloat of the exact text, and String() of it
+            // reproduces that text unless it has a trailing fraction zero or
+            // is below 1e-6 (exponent notation).
+            if (scale === 0) return unscaled;
+            if (abs % 10 !== 0 && scale < POW10.length) {
+                const value = unscaled / POW10[scale];
+                if (abs >= POW10[scale] / 1e6) return value;
+            }
+            return formatNumeric(String(abs), unscaled < 0, scale);
         }
-        const isMinus = unscaled < 0;
-        if (isMinus) unscaled = -unscaled;
-        let result = String(unscaled);
-        if (scale !== 0) {
-            const padded = result.padStart(scale + 1, '0');
-            const decimalStart = padded.length - scale;
-            result = `${padded.slice(0, decimalStart)}.${padded.slice(decimalStart)}`;
-        }
-        if (isMinus) result = `-${result}`;
-        const num = parseFloat(result);
-        if (prec <= 15 && result === String(num)) {
-            return num;
+        const result = formatNumeric(String(abs), unscaled < 0, scale);
+        if (prec <= 15) {
+            const num = parseFloat(result);
+            if (result === String(num)) return num;
         }
         return result;
     }
 
-    let unscaledValue = readSignedNumericBigInt(data, partCount, offset);
-    const isMinus = unscaledValue < 0n;
-
-    if (isMinus) {
-        unscaledValue = -unscaledValue;
-    }
-
-    let result = unscaledValue.toString();
-
-    // Insert decimal point
-    if (scale !== 0) {
-        const padded = result.padStart(scale + 1, '0');
-        const decimalStart = padded.length - scale;
-        result = `${padded.slice(0, decimalStart)}.${padded.slice(decimalStart)}`;
-    }
-
-    if (isMinus) {
-        result = `-${result}`;
-    }
-
-    // Try to return as number if safe
-    const num = parseFloat(result);
-    if (prec <= 15 && result === String(num)) {
-        return num;
+    const result = formatWideNumeric(data, partCount, offset, scale);
+    if (prec <= 15) {
+        const num = parseFloat(result);
+        if (result === String(num)) return num;
     }
     return result;
 }

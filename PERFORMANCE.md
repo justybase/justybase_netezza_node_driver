@@ -152,3 +152,52 @@ now discards instead of decoding (step 1), so `Read10_Dispose` is the same in
 every variant (~5.8 ms).
 
 **Decision: REJECTED.** No code change.
+
+---
+
+## 4. NUMERIC decoding without decimal text or BigInt
+
+**Problem.** `getCsNumeric` built the exact decimal text for every value
+(`String`, `padStart`, `slice`, template) and then decided number-vs-string by
+`parseFloat` + `String(num)` round trip. Values wider than two words, or with
+precision > 15, went through one BigInt per 32-bit word plus `toString()`.
+
+**Change.** Same contract, evaluated arithmetically:
+
+- Safe-integer values (any word count, higher words being sign extension):
+  for precision ≤ 15 the round-trip rule is closed-form. Scale 0 is always a
+  number. Otherwise a value is a number unless its last fraction digit is 0 or
+  it is below 1e-6 (where `String()` switches to exponent notation), and the
+  number is `unscaled / 10^scale`. With ≤ 15 significant digits that division
+  is correctly rounded, so it equals `parseFloat` of the exact text. Text is
+  built only when the result is a string.
+- Wider values: exact base-1e9 long division over 16-bit limbs (every
+  intermediate stays < 2^53), with the decimal point placed while the 9-digit
+  chunks are assembled. Same approach as the Rust `decode_wide_into`.
+- The old text-based implementation is kept in
+  `tests/NumericDecoding.unit.test.js` as the reference. Edge cases, random
+  values for every precision 1..38 and scale 0..p, and 20000 arbitrary word
+  patterns must return the identical type and value. Mutations of the 1e-6
+  boundary and of the trailing-zero rule are caught.
+
+Decoder-only replay (`justybase_netezza_driver_rust/benchmarks/netezza_cross_driver/numeric_replay.js`,
+200k iterations × 5 samples, ns/op):
+
+| Case | Before | After | Rust | C# |
+| --- | ---: | ---: | ---: | ---: |
+| NUMERIC(10,4) `123.4567` | 68.2 | 22.5 | 110.9 | 16.8 |
+| NUMERIC(10,4) `3.1400` | 57.8 | 38.1 | 130.0 | 23.1 |
+| NUMERIC(30,6) | 276.1 | 143.0 | 18.3 | 23.4 |
+| NUMERIC(38,8) negative | 330.6 | 150.0 | 18.1 | 44.8 |
+
+(Rust/C# columns copied from `NUMERIC_ANALYSIS.md`; they return fixed-width
+decimal types, while Node returns exact text for wide values.)
+
+| Fixture | Scenario | Before ms | After ms |
+| --- | --- | ---: | ---: |
+| fact200k | FullRead_GetValue | 110.53 | 97.08 |
+| fact200k | FullDecode_NoGetValue | 104.66 | 89.46 |
+
+Golden digests unchanged.
+
+**Decision: ACCEPTED.**
