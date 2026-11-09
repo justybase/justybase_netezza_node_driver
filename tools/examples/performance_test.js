@@ -20,7 +20,7 @@ try {
 } catch { }
 
 // --- Connection configuration ---
-const HOST = process.env.NZ_HOST || '192.168.0.144';
+const HOST = process.env.NZ_HOST || '127.0.0.1';
 const PORT = parseInt(process.env.NZ_PORT || '5480', 10);
 const USER = process.env.NZ_USER || 'admin';
 const PASSWORD = process.env.NZ_PASSWORD || 'password';

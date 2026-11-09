@@ -14,6 +14,12 @@ export interface TimeValue {
 
 export const POSTGRES_EPOCH_MS = Date.UTC(2000, 0, 1);
 
+/** Date with the wire-precision microseconds that a JavaScript Date cannot store. */
+export interface MicrosecondDate extends Date {
+    /** Microsecond fraction of the second (0..999999). */
+    microseconds?: number;
+}
+
 /**
  * Convert 8-byte timestamp (microseconds since 2000-01-01) to Date
  * @param data - 8 bytes little-endian
@@ -28,7 +34,15 @@ export function toDateTimeFrom8Bytes(data: Buffer, offset: number = 0): Date {
     const lo = data.readUInt32LE(offset);
     const hi = data.readInt32LE(offset + 4);
     const ms = hi * 4294967 + Math.floor((hi * 296 + lo) / 1000);
-    return new Date(POSTGRES_EPOCH_MS + ms);
+    const date = new Date(POSTGRES_EPOCH_MS + ms) as MicrosecondDate;
+    const totalMicros = BigInt.asIntN(64, (BigInt(hi) << 32n) | BigInt(lo >>> 0));
+    const fraction = Number(((totalMicros % 1_000_000n) + 1_000_000n) % 1_000_000n);
+    Object.defineProperty(date, 'microseconds', {
+        value: fraction,
+        enumerable: false,
+        configurable: true,
+    });
+    return date;
 }
 
 const MS_PER_DAY = 86_400_000;
@@ -155,21 +169,30 @@ export function parseTimeString(str: string | null): TimeValue | null {
  * @param data - 12 bytes
  */
 export function intervalRecvFloat(data: Buffer, offset: number = 0): string {
+    const totalMicros = data.readBigInt64LE(offset);
     const months = data.readInt32LE(offset + 8);
+    const negative = totalMicros < 0n || months < 0;
+    const absolute = totalMicros < 0n ? -totalMicros : totalMicros;
+    const dayMicros = 86_400_000_000n;
+    const days = Number(absolute / dayMicros);
+    const remainder = absolute % dayMicros;
+    const totalSeconds = Number(remainder / 1_000_000n);
+    const micros = Number(remainder % 1_000_000n);
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+    const pad = (value: number) => String(value).padStart(2, '0');
+    let time = `${pad(hours)}:${pad(minutes)}:${pad(seconds)}`;
+    if (micros !== 0) time += `.${String(micros).padStart(6, '0')}`;
 
-    const ts = timeRecvFloat(data, offset);
-
-    if (months === 0) {
-        return ts.toString();
-    }
-
-    const years = Math.floor(months / 12);
-    const remainingMonths = months % 12;
-
-    if (years > 0) {
-        return `${years} years ${remainingMonths} mons ${ts.toString()}`;
-    }
-    return `${remainingMonths} mons ${ts.toString()}`;
+    const years = Math.floor(Math.abs(months) / 12);
+    const remainingMonths = Math.abs(months) % 12;
+    const parts: string[] = [];
+    if (years !== 0) parts.push(`${years} years`);
+    if (remainingMonths !== 0) parts.push(`${remainingMonths} mons`);
+    if (days !== 0) parts.push(`${days} days`);
+    parts.push(time);
+    return `${negative ? '-' : ''}${parts.join(' ')}`;
 }
 
 /**
@@ -181,7 +204,7 @@ export function timetzOutput(data: Buffer, fldlen: number, offset: number = 0): 
     const time = timeRecvFloat(data, offset);
     const zoneSeconds = data.readInt32LE(offset + fldlen - 4);
 
-    const tzSign = zoneSeconds < 0 ? '+' : '-';
+    const tzSign = zoneSeconds < 0 ? '-' : '+';
     const absZone = Math.abs(zoneSeconds);
     const tzHours = Math.floor(absZone / 3600);
     const tzMinutes = Math.floor((absZone % 3600) / 60);
@@ -277,6 +300,10 @@ export function createTextBufferParser(typeOid: number, _typeMod: number = -1): 
         case 700:
         case 701:
             return (data, offset, len) => Number(data.toString('ascii', offset, offset + len));
+        case 2568:
+        case 2569:
+            return (data, offset, len) =>
+                parseBinaryText(data.toString('latin1', offset, offset + len));
         default:
             return null;
     }
@@ -296,6 +323,15 @@ function parseTimeText(value: string): TimeValue | null {
 
 function passthroughText(value: string): string {
     return value;
+}
+
+/** Decode the Netezza text form of VARBINARY (`X'<hex>'`) into bytes. */
+function parseBinaryText(value: string): Buffer {
+    const trimmed = value.trim();
+    const quoted = /^[Xx]'([0-9a-fA-F]*)'$/.exec(trimmed);
+    if (quoted) return Buffer.from(quoted[1], 'hex');
+    if (/^\\[xX][0-9a-fA-F]*$/.test(trimmed)) return Buffer.from(trimmed.slice(2), 'hex');
+    return Buffer.from(value, 'latin1');
 }
 
 function parseBooleanText(value: string): boolean {
@@ -440,17 +476,29 @@ function normalizeTimestampText(value: string): string | null {
     return `${datePart}T${timePart}${milliseconds}${timezone}`;
 }
 
+function attachMicroseconds(date: Date, text: string): Date {
+    const match = text.match(/\.(\d{1,6})/);
+    if (!match) return date;
+    const microseconds = Number(match[1].padEnd(6, '0'));
+    Object.defineProperty(date, 'microseconds', {
+        value: microseconds,
+        enumerable: false,
+        configurable: true,
+    });
+    return date;
+}
+
 function parseTimestampText(value: string): Date {
     const ms = plainTimestampMs(value);
-    if (!Number.isNaN(ms)) return new Date(ms);
+    if (!Number.isNaN(ms)) return attachMicroseconds(new Date(ms), value);
     const normalized = normalizeTimestampText(value);
     if (normalized) {
-        return new Date(normalized);
+        return attachMicroseconds(new Date(normalized), value);
     }
 
     const trimmed = value.trim();
     const hasTimezone = /(?:[zZ]|[+-][0-9]{2}(?::?[0-9]{2})?)$/.test(trimmed);
-    return new Date(`${trimmed.replace(' ', 'T')}${hasTimezone ? '' : 'Z'}`);
+    return attachMicroseconds(new Date(`${trimmed.replace(' ', 'T')}${hasTimezone ? '' : 'Z'}`), value);
 }
 
 export function createTextValueParser(typeOid: number, typeMod: number = -1): TextValueParser {
@@ -477,6 +525,9 @@ export function createTextValueParser(typeOid: number, typeMod: number = -1): Te
         case 1186:
         case 1266:
             return passthroughText;
+        case 2568:
+        case 2569:
+            return parseBinaryText;
         case 1700: {
             const { precision } = parseNumericTypeModifier(typeMod);
             return (value: string) => parseNumericTextWithPrecision(value, precision);
@@ -510,6 +561,9 @@ export function parseTextValue(value: string, typeOid: number, typeMod: number =
         case 1186:
         case 1266:
             return value;
+        case 2568:
+        case 2569:
+            return parseBinaryText(value);
         case 1700:
             return parseNumericText(value, typeMod);
         default:

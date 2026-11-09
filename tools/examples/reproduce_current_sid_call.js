@@ -16,7 +16,7 @@ const path = require('path');
 const { NzConnection } = require(path.join(__dirname, '../../dist/NzConnection'));
 
 const config = {
-    host: process.env.NZ_DEV_HOST || '192.168.0.144',
+    host: process.env.NZ_DEV_HOST || '127.0.0.1',
     port: parseInt(process.env.NZ_DEV_PORT || '5480', 10),
     database: process.env.NZ_DEV_DATABASE || 'JUST_DATA',
     user: process.env.NZ_DEV_USER || 'admin',

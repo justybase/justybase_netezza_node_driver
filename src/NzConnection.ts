@@ -1319,6 +1319,7 @@ class NzConnection extends EventEmitter {
         }
 
         const timeoutSeconds = commandOrSql.commandTimeout;
+        await this._waitForActiveExecution();
         if (!timeoutSeconds || timeoutSeconds <= 0) {
             return this._doExecute(commandOrSql);
         }
@@ -1421,6 +1422,7 @@ class NzConnection extends EventEmitter {
      */
     async executeReader<T = QueryResultRow>(command: NzCommand): Promise<NzDataReader<T>> {
         const timeoutSeconds = command.commandTimeout || this.commandTimeout;
+        await this._waitForActiveExecution();
         if (!timeoutSeconds || timeoutSeconds <= 0) {
             return this._doExecuteReader<T>(command);
         }
@@ -1946,7 +1948,7 @@ class NzConnection extends EventEmitter {
             }
 
             if (actualLen === 0) {
-                row[columnNumber] = null;
+                row[columnNumber] = '';
                 continue;
             }
 
@@ -2344,6 +2346,16 @@ class NzConnection extends EventEmitter {
                         return decodeLatin1(buf, off + 2, off + 2 + cursize);
                     };
                     break;
+                case NzType.NzTypeVarBinary: {
+                    parsers[i] = (buf: Buffer, off: number) => {
+                        const cursize = buf.readUInt16LE(off) - 2;
+                        return Buffer.from(buf.subarray(off + 2, off + 2 + cursize));
+                    };
+                    break;
+                }
+                case NzType.NzTypeBinary:
+                    parsers[i] = (buf: Buffer, off: number) => Buffer.from(buf.subarray(off, off + fldLen));
+                    break;
                 case NzType.NzTypeInt8:
                     parsers[i] = (buf: Buffer, off: number) => buf.readBigInt64LE(off);
                     break;
@@ -2417,6 +2429,12 @@ class NzConnection extends EventEmitter {
                 const s = buffer.readUInt16LE(offset) - 2;
                 return buffer.toString('latin1', offset + 2, offset + 2 + s);
             }
+            case NzType.NzTypeVarBinary: {
+                const s = buffer.readUInt16LE(offset) - 2;
+                return Buffer.from(buffer.subarray(offset + 2, offset + 2 + s));
+            }
+            case NzType.NzTypeBinary:
+                return Buffer.from(buffer.subarray(offset, offset + fldLen));
             case NzType.NzTypeInt8:
                 return buffer.readBigInt64LE(offset);
             case NzType.NzTypeInt:

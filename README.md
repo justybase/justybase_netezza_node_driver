@@ -322,6 +322,23 @@ Important: this project is an independent TypeScript implementation and does not
 
 > **Note**: The `node-netezza` package is included for **benchmarking**. The primary live compatibility reference is the C# `JustyBase.NetezzaDriver`.
 
+## Cross-driver conformance tests
+
+The shared corpus lives in `conformance/` at the workspace root and will move
+to `tests/conformance` as a submodule. It provisions its own `CONFORMANCE`
+schema on a live appliance and runs the same case corpus against Node, Rust,
+C# and Python.
+
+```powershell
+..\conformance\run-all.ps1 -Profile smoke -Bootstrap
+..\conformance\run-all.ps1 -Profile full -Bootstrap
+```
+
+This driver is executed by `tools/conformance/runner.js`. The report contains
+the case matrix, known divergences and JUnit XML. Build the driver first
+(`npm run build`). Host and credentials come only from `NZ_DEV_HOST` and the
+other `NZ_DEV_*` variables; there is no hard-coded lab address or password.
+
 ## Testing
 
 Repository CI runs formatting checks, Biome lint, TypeScript typechecks and
@@ -346,11 +363,11 @@ See [`.env.example`](.env.example) for a copy-paste template.
 
 ```bash
 # Windows (PowerShell)
-$env:NZ_DEV_HOST="192.168.0.144"
+$env:NZ_DEV_HOST="127.0.0.1"
 $env:NZ_DEV_PASSWORD="your_password"
 
 # Linux/macOS
-export NZ_DEV_HOST=192.168.0.144
+export NZ_DEV_HOST=127.0.0.1
 export NZ_DEV_PASSWORD=your_password
 ```
 

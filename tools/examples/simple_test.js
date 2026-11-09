@@ -5,7 +5,7 @@
 const { NzConnection } = require('../../dist');
 
 const config = {
-    host: '192.168.0.144',
+    host: '127.0.0.1',
     port: 5480,
     database: 'JUST_DATA',
     user: 'admin',
