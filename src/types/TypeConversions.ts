@@ -302,8 +302,7 @@ export function createTextBufferParser(typeOid: number, _typeMod: number = -1): 
             return (data, offset, len) => Number(data.toString('ascii', offset, offset + len));
         case 2568:
         case 2569:
-            return (data, offset, len) =>
-                parseBinaryText(data.toString('latin1', offset, offset + len));
+            return (data, offset, len) => parseBinaryText(data.toString('latin1', offset, offset + len));
         default:
             return null;
     }
