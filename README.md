@@ -470,6 +470,23 @@ Starting in `2.0.0`, loose text-protocol queries and table-backed binary queries
 
 The main mappings are `BOOL -> boolean`, `BYTEINT`/`INT2`/`INT4`/`OID -> number`, `INT8 -> bigint`, `DATE`/`TIMESTAMP`/`TIMESTAMPTZ`/`ABSTIME -> Date`, `TIME -> TimeValue`, and `NUMERIC -> number | string` using the existing precision-preserving rule.
 
+### Repeated values and immutable temporals
+
+Each result set keeps one decoded value per distinct cell in every column, so
+repeated strings, numeric text, dates, times and timestamps are returned as the
+same object/primitive without decoding again. The cache is bounded per column
+and switches itself off for high-cardinality columns. Set `valueCache: false`
+in the connection config to opt out.
+
+DATE and TIMESTAMP cells are `NzDate`/`NzTimestamp`: immutable `Date`
+subclasses that keep `instanceof Date` and every read method, but throw on
+mutators such as `setTime`. TIME cells are immutable `NzTime` objects with the
+same `toString()` shape as before. Copy a temporal value with
+`new Date(row.date)` when you need a mutable object.
+
+Repeated numeric values are strings only when the precision rule already
+required a string; the primitive `number` form is unaffected.
+
 ## Build
 
 ```bash

@@ -25,6 +25,7 @@ export { NzDataReader, type ColumnDescription, type ColumnMetadata, type Generat
 export { NzPool } from './NzPool';
 export type { NzPoolConfig } from './NzPool';
 export type { TimeValue } from './types/TypeConversions';
+export { NzDate, NzTime, NzTimestamp } from './types/NzDate';
 export { NzDatabaseError, createNzDatabaseError, parseBackendErrorFields } from './errors/NzDatabaseError';
 export { parseConnectionString } from './connectionString';
 export { escapeLiteral, substituteParameters } from './protocol/sqlParameters';

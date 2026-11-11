@@ -3,6 +3,8 @@
  * Port of C# DateTypes.cs and Numeric.cs
  */
 
+import { NzDate, NzTime, NzTimestamp } from './NzDate';
+
 /** Time value structure */
 export interface TimeValue {
     hours: number;
@@ -24,7 +26,7 @@ export interface MicrosecondDate extends Date {
  * Convert 8-byte timestamp (microseconds since 2000-01-01) to Date
  * @param data - 8 bytes little-endian
  */
-export function toDateTimeFrom8Bytes(data: Buffer, offset: number = 0): Date {
+export function toDateTimeFrom8Bytes(data: Buffer, offset: number = 0): NzTimestamp {
     // Exact floor(int64 microseconds / 1000) without BigInt:
     // 2^32 = 4294967 * 1000 + 296, so micros = hi * 4294967 * 1000 + (hi * 296 + lo)
     // and every term stays a safe integer over the whole int64 range. Flooring
@@ -34,15 +36,9 @@ export function toDateTimeFrom8Bytes(data: Buffer, offset: number = 0): Date {
     const lo = data.readUInt32LE(offset);
     const hi = data.readInt32LE(offset + 4);
     const ms = hi * 4294967 + Math.floor((hi * 296 + lo) / 1000);
-    const date = new Date(POSTGRES_EPOCH_MS + ms) as MicrosecondDate;
     const totalMicros = BigInt.asIntN(64, (BigInt(hi) << 32n) | BigInt(lo >>> 0));
     const fraction = Number(((totalMicros % 1_000_000n) + 1_000_000n) % 1_000_000n);
-    Object.defineProperty(date, 'microseconds', {
-        value: fraction,
-        enumerable: false,
-        configurable: true,
-    });
-    return date;
+    return new NzTimestamp(POSTGRES_EPOCH_MS + ms, fraction);
 }
 
 const MS_PER_DAY = 86_400_000;
@@ -51,35 +47,9 @@ const MS_PER_DAY = 86_400_000;
  * Convert 4-byte date (days since 2000-01-01) to Date
  * @param data - 4 bytes little-endian
  */
-export function toDateTimeFrom4Bytes(data: Buffer, offset: number = 0): Date {
+export function toDateTimeFrom4Bytes(data: Buffer, offset: number = 0): NzDate {
     const days = data.readInt32LE(offset);
-    return new Date(POSTGRES_EPOCH_MS + days * MS_PER_DAY);
-}
-
-/** TimeValue decoded from the binary protocol; `toString` lives on the prototype. */
-class BinaryTimeValue implements TimeValue {
-    hours: number;
-    minutes: number;
-    seconds: number;
-    microseconds: number;
-
-    constructor(hours: number, minutes: number, seconds: number, microseconds: number) {
-        this.hours = hours;
-        this.minutes = minutes;
-        this.seconds = seconds;
-        this.microseconds = microseconds;
-    }
-
-    toString(): string {
-        const hh = String(this.hours).padStart(2, '0');
-        const mm = String(this.minutes).padStart(2, '0');
-        const ss = String(this.seconds).padStart(2, '0');
-        if (this.microseconds > 0) {
-            const us = String(this.microseconds).padStart(6, '0');
-            return `${hh}:${mm}:${ss}.${us}`;
-        }
-        return `${hh}:${mm}:${ss}`;
-    }
+    return new NzDate(POSTGRES_EPOCH_MS + days * MS_PER_DAY);
 }
 
 /**
@@ -105,7 +75,7 @@ export function timeRecvFloat(data: Buffer, offset: number = 0): TimeValue {
     const minutes = Math.floor((totalSeconds % 3600) / 60);
     const seconds = totalSeconds % 60;
 
-    return new BinaryTimeValue(hours, minutes, seconds, remainingMicros);
+    return new NzTime(hours, minutes, seconds, remainingMicros);
 }
 
 /**
@@ -131,15 +101,7 @@ export function parseTimeString(str: string | null): TimeValue | null {
             }
         }
         if (plain) {
-            return {
-                hours,
-                minutes,
-                seconds,
-                microseconds,
-                toString(): string {
-                    return timeString;
-                },
-            };
+            return new NzTime(hours, minutes, seconds, microseconds, timeString);
         }
     }
     const parts = timeString.split(':');
@@ -153,15 +115,7 @@ export function parseTimeString(str: string | null): TimeValue | null {
         microseconds = parseInt(secParts[1].substring(0, 6).padEnd(6, '0'), 10);
     }
 
-    return {
-        hours,
-        minutes,
-        seconds,
-        microseconds,
-        toString(): string {
-            return timeString;
-        },
-    };
+    return new NzTime(hours, minutes, seconds, microseconds, timeString);
 }
 
 /**
@@ -225,9 +179,9 @@ export function timetzOutput(data: Buffer, fldlen: number, offset: number = 0): 
  * Used for system tables
  * @param data - 4 bytes
  */
-export function timestampRecvInt(data: Buffer, offset: number = 0): Date {
+export function timestampRecvInt(data: Buffer, offset: number = 0): NzTimestamp {
     const seconds = data.readInt32LE(offset);
-    return new Date(seconds * 1000);
+    return new NzTimestamp(seconds * 1000, 0);
 }
 
 const TYPE_MOD_OFFSET = 16;
@@ -395,12 +349,12 @@ function plainDateMs(text: string, pos: number): number {
     return Date.UTC(year, month - 1, day);
 }
 
-function parseDateText(value: string): Date {
+function parseDateText(value: string): NzDate {
     if (value.length === 10) {
         const ms = plainDateMs(value, 0);
-        if (!Number.isNaN(ms)) return new Date(ms);
+        if (!Number.isNaN(ms)) return new NzDate(ms);
     }
-    return new Date(`${value.trim()}T00:00:00.000Z`);
+    return new NzDate(new Date(`${value.trim()}T00:00:00.000Z`).getTime());
 }
 
 /**
@@ -475,29 +429,24 @@ function normalizeTimestampText(value: string): string | null {
     return `${datePart}T${timePart}${milliseconds}${timezone}`;
 }
 
-function attachMicroseconds(date: Date, text: string): Date {
+function timestampMicroseconds(text: string): number {
     const match = text.match(/\.(\d{1,6})/);
-    if (!match) return date;
-    const microseconds = Number(match[1].padEnd(6, '0'));
-    Object.defineProperty(date, 'microseconds', {
-        value: microseconds,
-        enumerable: false,
-        configurable: true,
-    });
-    return date;
+    if (!match) return 0;
+    return Number(match[1].padEnd(6, '0'));
 }
 
-function parseTimestampText(value: string): Date {
+function parseTimestampText(value: string): NzTimestamp {
+    const microseconds = timestampMicroseconds(value);
     const ms = plainTimestampMs(value);
-    if (!Number.isNaN(ms)) return attachMicroseconds(new Date(ms), value);
+    if (!Number.isNaN(ms)) return new NzTimestamp(ms, microseconds);
     const normalized = normalizeTimestampText(value);
     if (normalized) {
-        return attachMicroseconds(new Date(normalized), value);
+        return new NzTimestamp(new Date(normalized).getTime(), microseconds);
     }
 
     const trimmed = value.trim();
     const hasTimezone = /(?:[zZ]|[+-][0-9]{2}(?::?[0-9]{2})?)$/.test(trimmed);
-    return attachMicroseconds(new Date(`${trimmed.replace(' ', 'T')}${hasTimezone ? '' : 'Z'}`), value);
+    return new NzTimestamp(new Date(`${trimmed.replace(' ', 'T')}${hasTimezone ? '' : 'Z'}`).getTime(), microseconds);
 }
 
 export function createTextValueParser(typeOid: number, typeMod: number = -1): TextValueParser {

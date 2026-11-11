@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.5.0] - 2026-11-11
+
+### Added
+- Per-result-set, per-column value deduplication (`valueCache`, enabled by
+  default): repeated strings, numeric text, DATE, TIME and TIMESTAMP values
+  return the same immutable object instead of being decoded and allocated
+  again. The cache is bounded per column, disables itself on high-cardinality
+  columns, and can be turned off with `valueCache: false`. `diagnostics`
+  exposes `valueCacheHits`, `valueCacheMisses`, `valueCacheInsertions`,
+  `valueCacheRejected` and `valueCacheDisabledColumns`.
+- `NzDate`, `NzTimestamp` and `NzTime` are exported from the package.
+
+### Changed
+- DATE and TIMESTAMP results are immutable `NzDate`/`NzTimestamp` subclasses:
+  `instanceof Date` and every read method are preserved, but mutators such as
+  `setHours` throw. Copy with `new Date(value)` when a mutable value is
+  needed. TIME results are immutable `NzTime` objects with the same
+  `toString()` form as before.
+- NUMERIC cache keys use the decoded storage width, so repeated NUMERIC values
+  are shared across rows.
+
+### Fixed
+- `microseconds` remains a non-enumerable property on TIMESTAMP values.
+
 ## [3.4.4] - 2026-10-23
 
 ### Changed

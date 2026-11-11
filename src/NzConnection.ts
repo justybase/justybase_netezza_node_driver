@@ -6,6 +6,7 @@ import { EventEmitter } from 'node:events';
 import { Handshake } from './Handshake';
 import { PGUtil } from './utils/PGUtil';
 import { decodeLatin1, decodeUtf8 } from './utils/textDecode';
+import { ValueCache } from './utils/ValueCache';
 import { NzCommand } from './NzCommand';
 import { NzDataReader, type GeneratorItem, type ColumnDescription, type ReaderRowSource } from './NzDataReader';
 import { DbosTupleDesc } from './DbosTupleDesc';
@@ -205,6 +206,12 @@ export interface NzConnectionConfig {
     clientHostName?: string;
     /** Numeric Netezza client type sent in the handshake (default: Node, 15) */
     clientType?: number;
+    /**
+     * Deduplicate repeated cell values per column and result set (default: true).
+     * Strings, numeric text, DATE, TIME and TIMESTAMP values are immutable, so
+     * the same object/primitive can safely be returned for repeated wire bytes.
+     */
+    valueCache?: boolean;
 }
 
 /** A single row returned by a buffered `query()`. Values are `unknown` until narrowed. */
@@ -236,6 +243,77 @@ type Stream = net.Socket | tls.TLSSocket;
 type TextValueParser = (value: string) => unknown;
 type TextBufferParser = (data: Buffer, offset: number, len: number) => unknown;
 type BinaryFieldParser = (buffer: Buffer, fieldStart: number) => unknown;
+
+/** DBOS field types whose decoded values are immutable and worth deduplicating. */
+const CACHEABLE_DBOS_TYPES = new Set<number>([
+    NzType.NzTypeDate,
+    NzType.NzTypeNumeric,
+    NzType.NzTypeTime,
+    NzType.NzTypeTimestamp,
+    NzType.NzTypeInterval,
+    NzType.NzTypeTimeTz,
+    NzType.NzTypeChar,
+    NzType.NzTypeVarChar,
+    NzType.NzTypeVarFixedChar,
+    NzType.NzTypeNChar,
+    NzType.NzTypeNVarChar,
+    NzType.NzTypeJson,
+    NzType.NzTypeJsonb,
+    NzType.NzTypeJsonpath,
+]);
+
+/** DBOS field types with a 2-byte length prefix before the value bytes. */
+const VARYING_DBOS_TYPES = new Set<number>([
+    NzType.NzTypeVarChar,
+    NzType.NzTypeVarFixedChar,
+    NzType.NzTypeNChar,
+    NzType.NzTypeNVarChar,
+    NzType.NzTypeJson,
+    NzType.NzTypeJsonb,
+    NzType.NzTypeJsonpath,
+    NzType.NzTypeGeometry,
+    NzType.NzTypeVarBinary,
+]);
+
+/** Text-protocol OIDs that decode to mutable Buffers rather than values. */
+const NON_CACHEABLE_TEXT_OIDS = new Set<number>([16, 17, 20, 21, 23, 26, 28, 700, 701, 2500, 2568, 2569]);
+
+/**
+ * Storage width of a fixed-size DBOS field.
+ *
+ * `fieldSize` is the *definition* size: for NUMERIC it packs precision/scale,
+ * not a byte count, so the key width must come from `fieldTrueSize`. Mirrors
+ * the Rust `DbosTupleDesc::fixed_width` mapping.
+ */
+function dbosFixedWidth(tupdesc: DbosTupleDesc, index: number): number {
+    switch (tupdesc.fieldType[index]) {
+        case NzType.NzTypeDouble:
+        case NzType.NzTypeTime:
+        case NzType.NzTypeTimestamp:
+        case NzType.NzTypeInt8:
+            return 8;
+        case NzType.NzTypeInt:
+        case NzType.NzTypeFloat:
+        case NzType.NzTypeDate:
+            return 4;
+        case NzType.NzTypeInt2:
+            return 2;
+        case NzType.NzTypeBool:
+        case NzType.NzTypeInt1:
+            return 1;
+        case NzType.NzTypeInterval:
+        case NzType.NzTypeTimeTz:
+            return 12;
+        case NzType.NzTypeChar:
+            return tupdesc.fieldSize[index];
+        default:
+            return tupdesc.fieldTrueSize[index];
+    }
+}
+
+function isCacheableTextOid(typeOid: number): boolean {
+    return !NON_CACHEABLE_TEXT_OIDS.has(typeOid);
+}
 
 const READ_BUFFER_INITIAL_SIZE = 65536;
 /** A read buffer above this size is released after each response. */
@@ -290,6 +368,9 @@ class NzConnection extends EventEmitter {
     private _textBufferParsers: (TextBufferParser | null)[] | null = null;
     private _binaryFieldParsers: BinaryFieldParser[] | null = null;
     private _dbosRowPlan: DbosRowPlan | null = null;
+    /** One value cache per result column; rebuilt with every row description. */
+    private _valueCaches: (ValueCache<unknown> | null)[] = [];
+    private _valueCachesEnabled: boolean = true;
     private _tupdesc: DbosTupleDesc = new DbosTupleDesc();
     private _batchRowCache: unknown[][] | null = null;
     private _batchRowCacheIndex: number = 0;
@@ -305,6 +386,7 @@ class NzConnection extends EventEmitter {
     }
     private _resetDiag(): void {
         this._diag = NzConnection._emptyDiag();
+        this._valueCaches = [];
     }
     // One fixed shape, so hot-path counter updates keep a stable hidden class.
     private static _emptyDiag(): Record<string, number> {
@@ -333,6 +415,11 @@ class NzConnection extends EventEmitter {
             textDataRowViewHits: 0,
             textDataRowViewFallbacks: 0,
             discardedRows: 0,
+            valueCacheHits: 0,
+            valueCacheMisses: 0,
+            valueCacheInsertions: 0,
+            valueCacheRejected: 0,
+            valueCacheDisabledColumns: 0,
         };
     }
 
@@ -420,6 +507,7 @@ class NzConnection extends EventEmitter {
         super();
         this.config = typeof config === 'string' ? parseConnectionString(config) : config;
         normalizeClientType(this.config.clientType);
+        this._valueCachesEnabled = this.config.valueCache !== false;
         this._initBuffer();
         if (this.config.connectionTimeout !== undefined) {
             this.connectionTimeout = this.config.connectionTimeout;
@@ -1854,6 +1942,10 @@ class NzConnection extends EventEmitter {
         }
     }
 
+    private _newValueCache(): ValueCache<unknown> | null {
+        return this._valueCachesEnabled ? new ValueCache<unknown>(this._diag) : null;
+    }
+
     private _parseRowDescription(data: Buffer, command: NzCommand): void {
         if (debug.enabled) {
             debug('parseRowDescription data length:', data.length, 'hex:', data.toString('hex', 0, 50));
@@ -1868,6 +1960,7 @@ class NzConnection extends EventEmitter {
         offset += 2;
         debug('Column count:', count);
         this._rowDescription = [];
+        this._valueCaches = new Array(count).fill(null);
 
         for (let i = 0; i < count; i++) {
             const nameStart = offset;
@@ -1896,6 +1989,9 @@ class NzConnection extends EventEmitter {
             offset += 1;
 
             this._rowDescription.push({ name, typeOid, typeLen, typeMod, format });
+            if (isCacheableTextOid(typeOid)) {
+                this._valueCaches[i] = this._newValueCache();
+            }
             debug('Column', i, ':', name, 'typeOid:', typeOid, 'typeLen:', typeLen);
         }
 
@@ -1952,20 +2048,35 @@ class NzConnection extends EventEmitter {
                 continue;
             }
 
+            const cache = this._valueCaches[columnNumber];
+            if (cache !== undefined && cache !== null) {
+                const cached = cache.get(data, dataIdx, dataIdx + actualLen);
+                if (cached !== undefined) {
+                    row[columnNumber] = cached;
+                    dataIdx += actualLen;
+                    continue;
+                }
+            }
+
             // Fast path: parse directly from Buffer for known types
             const bufParser = this._textBufferParsers?.[columnNumber];
+            let parsed: unknown;
             if (bufParser) {
                 this._diag.textParseFastPath++;
-                row[columnNumber] = bufParser(data, dataIdx, actualLen);
+                parsed = bufParser(data, dataIdx, actualLen);
             } else {
                 this._diag.textParseSlowPath++;
                 const colDesc = (this._rowDescription as ColumnInfo[])[columnNumber];
                 const value = decodeUtf8(data, dataIdx, dataIdx + actualLen);
                 const parser = this._textColumnParsers?.[columnNumber];
-                row[columnNumber] = parser
+                parsed = parser
                     ? parser(value)
                     : TypeConversions.parseTextValue(value, colDesc?.typeOid, colDesc?.typeMod ?? -1);
             }
+            if (cache !== undefined && cache !== null) {
+                cache.set(data, dataIdx, dataIdx + actualLen, parsed);
+            }
+            row[columnNumber] = parsed;
             dataIdx += actualLen;
         }
         return row;
@@ -2323,6 +2434,7 @@ class NzConnection extends EventEmitter {
     private _buildBinaryFieldParsers(): BinaryFieldParser[] {
         const numFields = this._tupdesc.numFields;
         const parsers = new Array<BinaryFieldParser>(numFields);
+        this._valueCaches = new Array(numFields).fill(null);
 
         for (let i = 0; i < numFields; i++) {
             const fldType = this._tupdesc.fieldType[i];
@@ -2403,6 +2515,41 @@ class NzConnection extends EventEmitter {
                 default:
                     parsers[i] = (buf: Buffer, off: number) => buf.toString('utf8', off, off + fldLen);
                     break;
+            }
+
+            if (CACHEABLE_DBOS_TYPES.has(fldType)) {
+                this._valueCaches[i] = this._newValueCache();
+            }
+        }
+
+        // Wrap cacheable parsers: the key is the exact encoded field bytes, so
+        // repeated values never allocate a decoded string/date/numeric.
+        for (let i = 0; i < numFields; i++) {
+            const cache = this._valueCaches[i];
+            if (cache === undefined || cache === null) continue;
+            const parser = parsers[i];
+            const fldType = this._tupdesc.fieldType[i];
+            if (VARYING_DBOS_TYPES.has(fldType)) {
+                parsers[i] = (buf: Buffer, off: number) => {
+                    const start = off + 2;
+                    const end = off + buf.readUInt16LE(off);
+                    const cached = cache.get(buf, start, end);
+                    if (cached !== undefined) return cached;
+                    const parsed = parser(buf, off);
+                    cache.set(buf, start, end, parsed);
+                    return parsed;
+                };
+            } else {
+                const width = dbosFixedWidth(this._tupdesc, i);
+                if (width <= 0) continue;
+                parsers[i] = (buf: Buffer, off: number) => {
+                    const end = off + width;
+                    const cached = cache.get(buf, off, end);
+                    if (cached !== undefined) return cached;
+                    const parsed = parser(buf, off);
+                    cache.set(buf, off, end, parsed);
+                    return parsed;
+                };
             }
         }
 

@@ -14,6 +14,7 @@ const { ValueDigest, describeValue } = require('./helpers/replay/valueDigest');
 const GOLDEN = {
     dimdate: '7540f1592e5508b75688cfd9ca43f1741cac448f7977e5de308de33f3d636a9f',
     fact200k: '74097a6061747a4892e90cfe4bde523a33513172318e2c81a92cdc07d71d52ec',
+    events50k: '1bfe6b072b2246ed52c221225767db8672fc4daaacc3e914e03db3f73a7f4a23',
 };
 
 const WIRE_FIXTURES = [
@@ -115,6 +116,53 @@ describe('replay: C# .nzreplay fixtures', () => {
         });
     });
 
+    test('events50k decodes every value identically', async () => {
+        const fixture = loadFixture('events50k');
+        await withReplay(fixture, {}, async (connection) => {
+            const result = await digestAll(connection, fixture.query);
+            expect(result.rows).toBe(fixture.expectedRows);
+            expect(result.fieldCount).toBe(fixture.expectedColumns);
+            expect(result.first).toEqual([
+                1n,
+                1,
+                new Date('2024-01-01T00:00:01.000Z'),
+                79.19,
+                '104.7290',
+                2,
+                'PAID',
+                'SKU-00000001',
+                'note-1-ref-31',
+            ]);
+            expect(result.digest).toBe(GOLDEN.events50k);
+        });
+    });
+
+    test('events50k shares repeated STATUS values and disables high-cardinality columns', async () => {
+        const fixture = loadFixture('events50k');
+        await withReplay(fixture, {}, async (connection) => {
+            const reader = await connection.createCommand(fixture.query).executeReader();
+            const status = new Map();
+            let shared = 0;
+            while (await reader.read()) {
+                const value = reader.getValue(6);
+                expect(typeof value).toBe('string');
+                const previous = status.get(value);
+                if (previous === undefined) {
+                    status.set(value, value);
+                } else {
+                    expect(value).toBe(previous);
+                    shared++;
+                }
+            }
+            await reader.close();
+            expect(status.size).toBeGreaterThan(1);
+            expect(shared).toBeGreaterThan(40_000);
+            // EVENT_TS, AMOUNT, TAX, SKU and NOTE never reach the 2% probe.
+            expect(connection.diagnostics.valueCacheDisabledColumns).toBe(5);
+            expect(connection.diagnostics.valueCacheHits).toBeGreaterThan(40_000);
+        });
+    });
+
     test.each([1, 7, 4096])('dimdate is identical when the server writes %i-byte chunks', async (chunkSize) => {
         const fixture = loadFixture('dimdate');
         await withReplay(fixture, { chunkSize }, async (connection) => {
@@ -160,6 +208,53 @@ describe('replay: C# .nzreplay fixtures', () => {
             const result = await digestAll(connection, fixture.query);
             expect(result.digest).toBe(GOLDEN.dimdate);
             expect(connection._intBuf.length).toBe(64 * 1024);
+        });
+    });
+
+    test('fact200k deduplicates repeated temporal and numeric values', async () => {
+        const fixture = loadFixture('fact200k');
+        await withReplay(fixture, {}, async (connection) => {
+            const reader = await connection.createCommand(fixture.query).executeReader();
+            const byEpoch = new Map();
+            const byNumeric = new Map();
+            let sharedDates = 0;
+            let sharedNumerics = 0;
+            let rows = 0;
+            while (await reader.read()) {
+                const value = reader.getValue(2);
+                expect(value).toBeInstanceOf(Date);
+                const epoch = value.getTime();
+                const previous = byEpoch.get(epoch);
+                if (previous === undefined) {
+                    byEpoch.set(epoch, value);
+                } else {
+                    expect(value).toBe(previous);
+                    sharedDates++;
+                }
+
+                const numeric = reader.getValue(3);
+                if (typeof numeric === 'string') {
+                    const previousNumeric = byNumeric.get(numeric);
+                    if (previousNumeric === undefined) {
+                        byNumeric.set(numeric, numeric);
+                    } else {
+                        expect(numeric).toBe(previousNumeric);
+                        sharedNumerics++;
+                    }
+                }
+                rows++;
+            }
+            await reader.close();
+            expect(rows).toBe(fixture.expectedRows);
+            expect(sharedDates).toBeGreaterThan(0);
+            // A NUMERIC key must use the 8-byte storage width, not the packed
+            // precision/scale in `fieldSize`; otherwise the column self-disables.
+            expect(sharedNumerics).toBeGreaterThan(0);
+            expect(connection.diagnostics.valueCacheHits).toBeGreaterThan(0);
+            expect(connection.diagnostics.valueCacheInsertions).toBeGreaterThan(0);
+            expect(connection.diagnostics.valueCacheDisabledColumns).toBe(0);
+            const sample = byEpoch.values().next().value;
+            expect(() => sample.setTime(0)).toThrow(TypeError);
         });
     });
 

@@ -8,6 +8,8 @@ captures, using the same fixtures as the C# reference driver
   (INT4, TIMESTAMP, NVARCHAR).
 - `fact200k`: `SELECT * FROM JUST_DATA..FACTPRODUCTINVENTORY ORDER BY ROWID LIMIT 200000`,
   200000 rows × 7 columns (INT4, TIMESTAMP, NUMERIC(11,6), NVARCHAR).
+- `events50k`: the `PERF.EVENTS_400K` projection limited to 50000 rows, 9
+  columns (INT8, INT4, TIMESTAMP, DOUBLE, NUMERIC, INT4, three NVARCHARs).
 
 ## Method
 
@@ -29,7 +31,7 @@ npm run build && npm run bench:replay -- --samples 10 [--json out.json]
   noisy (±10%); large ratios are the robust signal.
 
 Correctness gate for every change: `tests/Replay.unit.test.js` pins a SHA-256
-digest of every decoded value (with its JS type) of both fixtures, plus
+digest of every decoded value (with its JS type) of all three fixtures, plus
 snapshots of the Rust driver's wire fixtures (`tests/fixtures/wire`: numeric
 precision matrix, DBOS types, NULL matrix, text protocol, multi-result,
 notices, errors, 32 KB varchar), also replayed in 1/3/7-byte chunks.
@@ -406,3 +408,44 @@ semantics) and `DbosTupleDesc.clear()` (a few small allocations per query):
 no measurable effect on the replay scenarios.
 
 **Decision: ACCEPTED.**
+
+---
+
+## 10. Per-column value deduplication
+
+**Problem.** Dimension-heavy results repeat the same DATE, TIMESTAMP, NUMERIC
+text and short strings in every row. Each repeat was decoded and allocated
+again (UTF-8 -> JS string, micros -> `Date`, numeric words -> decimal text).
+
+**Change.** Every result set owns one bounded `ValueCache` per column. The key
+is the exact encoded cell bytes; a hit returns the previously decoded value.
+A last-hit comparison handles runs of equal values without hashing, the key is
+bounded (64 bytes), entries are capped (2048 per column), and a column that
+still shows under 2% repetition after 8192 lookups disables its cache for the
+rest of the result set.
+
+Only immutable values are shared: strings, numeric text, and the new immutable
+`NzDate`/`NzTimestamp`/`NzTime` temporals (plain `Date` stays mutable for
+callers, `instanceof Date` is preserved). Buffers and other mutable values are
+never cached.
+
+**Effect (fact200k replay, deterministic).** Five cacheable columns, 200000
+rows: 998657 hits, 1343 misses/insertions, 0 rejected keys, 0 disabled
+columns. Repeated values no longer allocate; the golden value digests are
+unchanged.
+
+**Effect (alternating A/B, 5 rounds).** `fact200k` `FullRead_GetValue` median
+`83.3 ms` with `valueCache: false` vs `65.4 ms` with the cache (`-21.5%`),
+process CPU `95.0 ms` vs `93.0 ms`. A short-key byte loop in the hit path
+(keys are capped at 64 bytes) is what makes hits ~7 ns instead of ~60 ns and
+keeps the cache ahead of decoding.
+
+**Live check (JUST_DATA).** `PERF.EVENTS_400K` (400000 x 9): 399992 hits; the
+five high-cardinality columns (EVENT_TS, AMOUNT, TAX, SKU, NOTE) self-disabled
+after the probe, STATUS kept 8 entries. `ADMIN.FACTPRODUCTINVENTORY`
+(776286 x 7): all five cacheable columns stayed enabled, 3470756 hits /
+410674 misses, 4533 retained values.
+
+**Decision: ACCEPTED.** Covered by `tests/ValueCache.unit.test.js`, the
+replay identity assertions in `tests/Replay.unit.test.js`, and
+`tests/ValueCache.live.test.js` against the two benchmark tables.
